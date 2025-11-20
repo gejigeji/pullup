@@ -140,6 +140,56 @@ converter!(
     }
 });
 
+/// Convert Markdown images to Typst image function calls.
+/// This converter skips the alt text content inside image tags.
+pub struct ConvertImages<T> {
+    in_image: bool,
+    iter: T,
+}
+
+impl<'a, T> ConvertImages<T>
+where
+    T: Iterator<Item = ParserEvent<'a>>,
+{
+    pub fn new(iter: T) -> Self {
+        ConvertImages {
+            in_image: false,
+            iter,
+        }
+    }
+}
+
+impl<'a, T> Iterator for ConvertImages<T>
+where
+    T: Iterator<Item = ParserEvent<'a>>,
+{
+    type Item = ParserEvent<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.iter.next() {
+            Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Image(_, url, _)))) => {
+                self.in_image = true;
+                // Convert image start to FunctionCall event
+                // The URL needs to be wrapped in quotes for the function call
+                // Remove leading "./" if present
+                let url_str = url.as_ref().strip_prefix("./").unwrap_or(url.as_ref());
+                let url_str = format!("\"{}\"", url_str);
+                Some(ParserEvent::Typst(typst::Event::FunctionCall(None, "image".into(), vec![url_str.into()])))
+            },
+            Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Image(_, _, _)))) => {
+                self.in_image = false;
+                // Skip the end tag
+                self.next()
+            },
+            Some(event) if self.in_image => {
+                // Skip all content inside image tags (alt text)
+                self.next()
+            },
+            x => x,
+        }
+    }
+}
+
 converter!(
     /// Convert Markdown **strong** tags to Typst strong tags.
     ConvertStrong,
@@ -1044,6 +1094,65 @@ baz
                     ))),
                 ],
             );
+        }
+    }
+
+    mod images {
+        use super::*;
+
+        #[test]
+        fn convert_image() {
+            let md = "\
+整体交互流程图
+
+![整体交互流程图](./images/infeed/image2.png)
+";
+            let i = ConvertImages::new(MarkdownIter(Parser::new(&md)));
+
+            self::assert_eq!(
+                i.collect::<Vec<super::ParserEvent>>(),
+                vec![
+                    Markdown(MdEvent::Start(MdTag::Paragraph)),
+                    Markdown(MdEvent::Text(CowStr::Borrowed("整体交互流程图"))),
+                    Markdown(MdEvent::End(MdTag::Paragraph)),
+                    Typst(TypstEvent::FunctionCall(None, "image".into(), vec!["\"images/infeed/image2.png\"".into()])),
+                ]
+            );
+        }
+
+        #[test]
+        fn convert_image_without_prefix() {
+            let md = "![alt text](images/test.png)";
+            let i = ConvertImages::new(MarkdownIter(Parser::new(&md)));
+
+            let events: Vec<_> = i.collect();
+            // Find the FunctionCall event
+            let image_call = events.iter().find(|e| {
+                matches!(e, Typst(TypstEvent::FunctionCall(_, f, _)) if f.as_ref() == "image")
+            });
+            assert!(image_call.is_some(), "Should find image function call");
+            if let Some(Typst(TypstEvent::FunctionCall(_, _, args))) = image_call {
+                assert_eq!(args[0].as_ref(), "\"images/test.png\"");
+            }
+        }
+
+        #[test]
+        fn convert_image_skips_alt_text() {
+            let md = "![This is alt text](image.png)";
+            let i = ConvertImages::new(MarkdownIter(Parser::new(&md)));
+
+            let events: Vec<_> = i.collect();
+            // Alt text should not appear in the output
+            let has_alt_text = events.iter().any(|e| {
+                matches!(e, Markdown(MdEvent::Text(t)) if t.as_ref() == "This is alt text")
+            });
+            assert!(!has_alt_text, "Alt text should be skipped");
+            
+            // But image call should be present
+            let image_call = events.iter().find(|e| {
+                matches!(e, Typst(TypstEvent::FunctionCall(_, f, _)) if f.as_ref() == "image")
+            });
+            assert!(image_call.is_some(), "Should find image function call");
         }
     }
 
