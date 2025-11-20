@@ -149,6 +149,7 @@ pub struct ConvertImages<'a, T> {
     in_paragraph: bool,
     in_heading: bool,  // Track if we're inside a heading
     in_table_cell: bool,  // Track if we're inside a table cell
+    in_strong: bool,  // Track if we're inside a strong tag
     paragraph_closed_for_image: bool,  // Track if we closed a paragraph for an image
     buffer: VecDeque<ParserEvent<'a>>,
     iter: T,
@@ -164,6 +165,7 @@ where
             in_paragraph: false,
             in_heading: false,
             in_table_cell: false,
+            in_strong: false,
             paragraph_closed_for_image: false,
             buffer: VecDeque::new(),
             iter,
@@ -179,7 +181,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         // If we have buffered events, return them first
-        // But check if it's a heading event to update the flag
+        // But check if it's a heading or strong event to update the flag
         if let Some(event) = self.buffer.pop_front() {
             match &event {
                 ParserEvent::Typst(typst::Event::Start(typst::Tag::Heading(_, _, _))) => {
@@ -187,6 +189,12 @@ where
                 },
                 ParserEvent::Typst(typst::Event::End(typst::Tag::Heading(_, _, _))) => {
                     self.in_heading = false;
+                },
+                ParserEvent::Typst(typst::Event::Start(typst::Tag::Strong)) => {
+                    self.in_strong = true;
+                },
+                ParserEvent::Typst(typst::Event::End(typst::Tag::Strong)) => {
+                    self.in_strong = false;
                 },
                 _ => {}
             }
@@ -206,10 +214,35 @@ where
                 // Return the heading end event directly
                 Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Heading(level, toc, bookmarks))))
             },
+            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Strong))) => {
+                // Track that we're entering a strong tag
+                self.in_strong = true;
+                // Return the strong start event directly
+                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Strong)))
+            },
+            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Strong))) => {
+                // Track that we're exiting a strong tag
+                // If we're still in a paragraph, we need to close it first
+                // This can happen when a strong tag contains a paragraph that wasn't properly closed
+                if self.in_paragraph {
+                    self.in_paragraph = false;
+                    self.in_strong = false;
+                    self.buffer.push_back(ParserEvent::Typst(typst::Event::End(typst::Tag::Strong)));
+                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
+                } else {
+                    self.in_strong = false;
+                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Strong)))
+                }
+            },
             Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => {
                 // If we're inside an image, skip this paragraph (it's the paragraph containing the image)
                 if self.in_image {
                     self.next()
+                } else if self.in_strong {
+                    // In strong tag, preserve paragraph tags for TypstMarkup
+                    // Strong tags are inline elements, so paragraphs inside them should be preserved
+                self.in_paragraph = true;
+                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
                 } else if self.in_table_cell {
                     // In table cells, always preserve paragraph tags for TypstMarkup
                     // Even if the paragraph only contains an image, we need to keep the paragraph tags
@@ -278,8 +311,8 @@ where
             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
                 // In table cells, always preserve paragraph end tags
                 if self.in_table_cell {
-                    self.in_paragraph = false;
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
+                self.in_paragraph = false;
+                Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
                 } else {
                     self.in_paragraph = false;
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
@@ -307,8 +340,8 @@ where
                     // In table cells and already in a paragraph, just return the image
                     self.in_image = true;
                     Some(image_event)
-                } else if self.in_paragraph && !self.in_table_cell {
-                    // If we're in a paragraph (but not in a table cell), we need to close it before the image
+                } else if self.in_paragraph && !self.in_table_cell && !self.in_strong {
+                    // If we're in a paragraph (but not in a table cell or strong tag), we need to close it before the image
                     // But we need to check if there's content after the image in the same paragraph
                     // For now, close the paragraph and buffer the image
                     self.buffer.push_back(image_event);
@@ -335,7 +368,7 @@ where
                     // In table cells, if we're in a paragraph, we need to close it after the image
                     // Skip alt text and markdown paragraph end, then return paragraph end
                     loop {
-                        match self.iter.next() {
+                match self.iter.next() {
                             // Skip alt text (both Markdown and Typst, since ConvertText may have converted it)
                             Some(ParserEvent::Markdown(markdown::Event::Text(_))) => continue,
                             Some(ParserEvent::Typst(typst::Event::Text(_))) => continue,
@@ -386,8 +419,27 @@ where
                             },
                         }
                     }
+                } else if self.in_strong {
+                    // In strong tag, preserve paragraph tags for TypstMarkup
+                    // Skip alt text and markdown paragraph end, but preserve typst paragraph tags
+                    loop {
+                        match self.iter.next() {
+                            // Skip alt text (both Markdown and Typst, since ConvertText may have converted it)
+                            Some(ParserEvent::Markdown(markdown::Event::Text(_))) => continue,
+                            Some(ParserEvent::Typst(typst::Event::Text(_))) => continue,
+                            // Skip markdown paragraph end
+                            Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => continue,
+                            // In strong tag, preserve typst paragraph tags
+                            Some(event @ ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
+                                self.in_paragraph = false;
+                                break Some(event);
+                            },
+                            // Found something else, return it
+                            other => break other,
+                        }
+                    }
                 } else {
-                    // Not in table cell, skip paragraph tags as before
+                    // Not in table cell or strong tag, skip paragraph tags as before
                     loop {
                         match self.iter.next() {
                             // Skip alt text (both Markdown and Typst, since ConvertText may have converted it)
@@ -408,8 +460,8 @@ where
                 }
             },
             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image && !self.in_table_cell => {
-                // This paragraph end was for the paragraph that contained the image
-                // We already closed it, so skip this one
+                        // This paragraph end was for the paragraph that contained the image
+                        // We already closed it, so skip this one
                 // BUT: In table cells, preserve paragraph tags for TypstMarkup
                 self.paragraph_closed_for_image = false;
                 None
@@ -663,17 +715,17 @@ where
                                 match self.iter.next() {
                                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
                                         // All wrapped paragraph tags skipped, get next event
-                                        self.next()
-                                    },
-                                    other => other,
-                                }
-                            },
+                        self.next()
+                    },
+                    other => other,
+                }
+            },
                             other => other,
                         }
                     },
                     _ => {
                         // Skip any other events inside image tags
-                        self.next()
+                self.next()
                     },
                 }
             },
