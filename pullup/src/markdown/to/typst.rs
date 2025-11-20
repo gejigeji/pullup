@@ -144,14 +144,14 @@ converter!(
 /// This converter skips the alt text content inside image tags.
 /// It also ensures images are not inside paragraphs by closing the paragraph
 /// before the image and reopening it after if needed.
-pub struct ConvertImages<T> {
+pub struct ConvertImages<'a, T> {
     in_image: bool,
     in_paragraph: bool,
     buffer: VecDeque<ParserEvent<'a>>,
     iter: T,
 }
 
-impl<'a, T> ConvertImages<T>
+impl<'a, T> ConvertImages<'a, T>
 where
     T: Iterator<Item = ParserEvent<'a>>,
 {
@@ -165,7 +165,7 @@ where
     }
 }
 
-impl<'a, T> Iterator for ConvertImages<T>
+impl<'a, T> Iterator for ConvertImages<'a, T>
 where
     T: Iterator<Item = ParserEvent<'a>>,
 {
