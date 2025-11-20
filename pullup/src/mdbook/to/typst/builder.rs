@@ -154,9 +154,6 @@ where
             if this.images {
                 events = Box::new(ConvertImages::new(events));
             }
-            // Merge consecutive paragraphs after all other conversions
-            // This should run after ConvertImages to handle all converted events
-            events = Box::new(MergeConsecutiveParagraphs::new(events));
         }
 
         events
