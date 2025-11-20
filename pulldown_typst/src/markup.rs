@@ -22,6 +22,7 @@ pub struct TypstMarkup<'a, T> {
     codeblock_queue: VecDeque<()>,
     row_buffer: Option<String>,
     cell_buffer: Option<String>,
+    paragraph_closed_for_image: bool, // Track if we closed paragraph for an image
     iter: T,
 }
 
@@ -35,6 +36,7 @@ where
             codeblock_queue: VecDeque::new(),
             row_buffer: None,
             cell_buffer: None,
+            paragraph_closed_for_image: false,
             iter,
         }
     }
@@ -183,6 +185,14 @@ where
                 }
             }
             Some(Event::End(x)) => {
+                // If we closed paragraph for an image and this is the End(Paragraph) event,
+                // skip it since we already closed it (and removed it from tag_queue)
+                if matches!(x, Tag::Paragraph) && self.paragraph_closed_for_image {
+                    self.paragraph_closed_for_image = false;
+                    // We already removed the paragraph from tag_queue when processing FunctionCall,
+                    // so we just skip this End(Paragraph) event
+                    return Some("".to_string());
+                }
                 let ret = match x {
                     Tag::Paragraph => Some("]\n".to_string()),
                     Tag::Heading(_, _, _) => Some("\n".to_string()),
@@ -396,11 +406,23 @@ where
             Some(Event::Let(lhs, rhs)) => Some(format!("#let {lhs} = {rhs}\n")),
             Some(Event::FunctionCall(v, f, args)) => {
                 let args = args.join(", ");
-                if let Some(v) = v {
-                    Some(format!("#{v}.{f}({args})\n"))
-                } else {
-                    Some(format!("#{f}({args})\n"))
+                // If this is an image function call and we're in a paragraph, close the paragraph first
+                let mut result = String::new();
+                if f.as_ref() == "image" && self.tag_queue.back().map(|t| matches!(t, Tag::Paragraph)).unwrap_or(false) {
+                    // Close the paragraph before the image
+                    result.push_str("]\n");
+                    // Remove the paragraph from tag_queue since we're closing it
+                    if let Some(Tag::Paragraph) = self.tag_queue.pop_back() {
+                        // Mark that we closed paragraph for an image, so we can skip the next End(Paragraph) event
+                        self.paragraph_closed_for_image = true;
+                    }
                 }
+                if let Some(v) = v {
+                    result.push_str(&format!("#{v}.{f}({args})\n"));
+                } else {
+                    result.push_str(&format!("#{f}({args})\n"));
+                }
+                Some(result)
             }
             Some(Event::DocumentFunctionCall(args)) => {
                 let args = args.join(", ");
@@ -816,5 +838,50 @@ mod tests {
         let output = TypstMarkup::new(input.into_iter()).collect::<String>();
         let expected = "#table(\n  columns: 1,\n  [comment \\/\\/ test \\*bold\\*],\n)\n";
         assert_eq!(output, expected, "Both forward slashes and asterisks should be escaped in table cells");
+    }
+
+    mod images {
+        use super::*;
+
+        #[test]
+        fn image_not_in_paragraph() {
+            let input = vec![
+                Event::Start(Tag::Paragraph),
+                Event::Text("Some text".into()),
+                Event::FunctionCall(None, "image".into(), vec!["\"images/spx/image1.png\"".into()]),
+                Event::End(Tag::Paragraph),
+            ];
+            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+            // Image should not be wrapped in paragraph, paragraph should be closed before image
+            let expected = "#par()[Some text]\n#image(\"images/spx/image1.png\")\n";
+            assert_eq!(output, expected, "Image should not be wrapped in paragraph");
+        }
+
+        #[test]
+        fn image_between_paragraphs() {
+            let input = vec![
+                Event::Start(Tag::Paragraph),
+                Event::Text("Some text".into()),
+                Event::End(Tag::Paragraph),
+                Event::FunctionCall(None, "image".into(), vec!["\"images/spx/image1.png\"".into()]),
+                Event::Start(Tag::Paragraph),
+                Event::Text(" more text".into()),
+                Event::End(Tag::Paragraph),
+            ];
+            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+            // Image should be standalone between paragraphs
+            let expected = "#par()[Some text]\n#image(\"images/spx/image1.png\")\n#par()[ more text]\n";
+            assert_eq!(output, expected, "Image should be standalone between paragraphs");
+        }
+
+        #[test]
+        fn image_standalone() {
+            let input = vec![
+                Event::FunctionCall(None, "image".into(), vec!["\"images/spx/image1.png\"".into()]),
+            ];
+            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+            let expected = "#image(\"images/spx/image1.png\")\n";
+            assert_eq!(output, expected, "Standalone image should not be wrapped");
+        }
     }
 }
