@@ -150,7 +150,6 @@ pub struct ConvertImages<'a, T> {
     in_heading: bool,  // Track if we're inside a heading
     in_table_cell: bool,  // Track if we're inside a table cell
     in_strong: bool,  // Track if we're inside a strong tag
-    in_code_block: bool,  // Track if we're inside a code block
     paragraph_closed_for_image: bool,  // Track if we closed a paragraph for an image
     buffer: VecDeque<ParserEvent<'a>>,
     iter: T,
@@ -167,7 +166,6 @@ where
             in_heading: false,
             in_table_cell: false,
             in_strong: false,
-            in_code_block: false,
             paragraph_closed_for_image: false,
             buffer: VecDeque::new(),
             iter,
@@ -183,7 +181,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         // If we have buffered events, return them first
-        // But check if it's a heading, strong, or code block event to update the flag
+        // But check if it's a heading or strong event to update the flag
         if let Some(event) = self.buffer.pop_front() {
             match &event {
                 ParserEvent::Typst(typst::Event::Start(typst::Tag::Heading(_, _, _))) => {
@@ -197,12 +195,6 @@ where
                 },
                 ParserEvent::Typst(typst::Event::End(typst::Tag::Strong)) => {
                     self.in_strong = false;
-                },
-                ParserEvent::Typst(typst::Event::Start(typst::Tag::CodeBlock(_, _))) => {
-                    self.in_code_block = true;
-                },
-                ParserEvent::Typst(typst::Event::End(typst::Tag::CodeBlock(_, _))) => {
-                    self.in_code_block = false;
                 },
                 _ => {}
             }
@@ -783,26 +775,6 @@ where
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
                 } else {
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Item)))
-                }
-            },
-            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::CodeBlock(lang, display)))) => {
-                // Track that we're entering a code block
-                self.in_code_block = true;
-                // Return the code block start event directly
-                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::CodeBlock(lang, display))))
-            },
-            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::CodeBlock(lang, display)))) => {
-                // Track that we're exiting a code block
-                // If we're still in a paragraph, we need to close it first
-                // This can happen when a code block contains a paragraph that wasn't properly closed
-                if self.in_paragraph {
-                    self.in_paragraph = false;
-                    self.in_code_block = false;
-                    self.buffer.push_back(ParserEvent::Typst(typst::Event::End(typst::Tag::CodeBlock(lang, display))));
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
-                } else {
-                    self.in_code_block = false;
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::CodeBlock(lang, display))))
                 }
             },
             x => x,
