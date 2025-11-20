@@ -714,6 +714,17 @@ where
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::TableCell)))
                 }
             },
+            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Item))) => {
+                // If we're still in a paragraph, we need to close it first
+                // This can happen when a list item contains a paragraph that wasn't properly closed
+                if self.in_paragraph {
+                    self.in_paragraph = false;
+                    self.buffer.push_back(ParserEvent::Typst(typst::Event::End(typst::Tag::Item)));
+                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
+                } else {
+                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Item)))
+                }
+            },
             x => x,
         }
     }
