@@ -761,6 +761,9 @@ where
                             // In table cells, text should already be in a paragraph (created by ConvertParagraphs)
                             // Just return the text as-is
                             Some(next_event)
+                        } else if self.in_paragraph {
+                            // Already in a paragraph, just return the text
+                            Some(next_event)
                         } else {
                             // We need to create a new paragraph for it
                             self.paragraph_closed_for_image = false;
@@ -880,12 +883,15 @@ converter!(
 
 converter!(
     /// Convert Markdown soft breaks to Typst line breaks.
+    /// In paragraphs, soft breaks are converted to linebreaks to preserve line structure.
     ConvertSoftBreaks,
     ParserEvent<'a> => ParserEvent<'a>,
     |this: &mut Self| {
         match this.iter.next() {
             Some(ParserEvent::Markdown(markdown::Event::SoftBreak)) => {
-                Some(ParserEvent::Typst(typst::Event::Text(" ".into())))
+                // Convert soft breaks to linebreaks instead of spaces
+                // This preserves the line structure in paragraphs
+                Some(ParserEvent::Typst(typst::Event::Linebreak))
             },
             x => x,
     }
@@ -964,6 +970,11 @@ where
                         },
                         // Skip Typst Linebreak events (they might be inserted by other converters)
                         Some(ParserEvent::Typst(typst::Event::Linebreak)) => {
+                            next_event = self.iter.next();
+                            continue;
+                        },
+                        // Skip Parbreak events (paragraph breaks)
+                        Some(ParserEvent::Typst(typst::Event::Parbreak)) => {
                             next_event = self.iter.next();
                             continue;
                         },
@@ -1576,6 +1587,7 @@ baz
         #[test]
         fn soft() {
             // Note that "foo" DOES NOT HAVE two spaces after it.
+            // Soft breaks are now converted to linebreaks to preserve line structure
             let md = "\
 foo
 bar
@@ -1587,7 +1599,7 @@ bar
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
                     Markdown(MdEvent::Text(CowStr::Borrowed("foo"))),
-                    Typst(TypstEvent::Text(CowStr::Borrowed(" "))),
+                    Typst(TypstEvent::Linebreak),
                     Markdown(MdEvent::Text(CowStr::Borrowed("bar"))),
                     Markdown(MdEvent::End(MdTag::Paragraph)),
                 ]
