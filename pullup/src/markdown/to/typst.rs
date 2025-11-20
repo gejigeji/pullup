@@ -210,6 +210,10 @@ where
                 // If we're inside an image, skip this paragraph (it's the paragraph containing the image)
                 if self.in_image {
                     self.next()
+                } else if self.in_table_cell {
+                    // In table cells, always preserve paragraph tags for TypstMarkup
+                    self.in_paragraph = true;
+                    Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
                 } else {
                     // If we closed a paragraph for an image and now see a new paragraph start,
                     // it means there's content after the image that needs its own paragraph
@@ -303,6 +307,7 @@ where
                 // 1. Any remaining alt text (Markdown or Typst events)
                 // 2. Markdown paragraph end
                 // 3. Typst paragraph start/end (the paragraph containing the image)
+                // BUT: In table cells, we must preserve paragraph tags for TypstMarkup
                 // Keep skipping until we find something that's not part of the image paragraph
                 loop {
                     match self.iter.next() {
@@ -312,19 +317,28 @@ where
                         // Skip markdown paragraph end
                         Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => continue,
                         // Skip typst paragraph tags (the paragraph containing the image)
-                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => continue,
-                        Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
+                        // BUT: In table cells, preserve paragraph tags
+                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) if !self.in_table_cell => continue,
+                        Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_table_cell => {
                             // All wrapped paragraph tags skipped, get next event
                             break self.next();
+                        },
+                        // In table cells, preserve paragraph events
+                        Some(event @ ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) if self.in_table_cell => {
+                            break Some(event);
+                        },
+                        Some(event @ ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if self.in_table_cell => {
+                            break Some(event);
                         },
                         // Found something else (like a heading), return it
                         other => break other,
                     }
                 }
             },
-            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image => {
+            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image && !self.in_table_cell => {
                 // This paragraph end was for the paragraph that contained the image
                 // We already closed it, so skip this one
+                // BUT: In table cells, preserve paragraph tags for TypstMarkup
                 self.paragraph_closed_for_image = false;
                 None
             },
