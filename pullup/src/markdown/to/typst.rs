@@ -212,8 +212,6 @@ where
                     self.next()
                 } else if self.in_table_cell {
                     // In table cells, always preserve paragraph tags for TypstMarkup
-                    // Even if the paragraph only contains an image, we need to keep the paragraph tags
-                    // Don't peek ahead to check for images - just preserve the paragraph start
                     self.in_paragraph = true;
                     Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
                 } else {
@@ -276,14 +274,8 @@ where
                 }
             },
             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
-                // In table cells, always preserve paragraph end tags
-                if self.in_table_cell {
-                    self.in_paragraph = false;
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
-                } else {
-                    self.in_paragraph = false;
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
-                }
+                self.in_paragraph = false;
+                Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
             },
             Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Image(_, url, _)))) => {
                 // Convert image start to FunctionCall event
@@ -293,32 +285,18 @@ where
                 let url_str_with_quotes = format!("\"{}\"", url_str);
                 let image_event = ParserEvent::Typst(typst::Event::FunctionCall(None, "image".into(), vec![url_str_with_quotes.into()]));
                 
-                if self.in_table_cell && !self.in_paragraph {
-                    // In table cells, if we encounter an image and there's no paragraph yet,
-                    // we need to create a paragraph start first (TypstMarkup expects it)
-                    // Return paragraph start first, then buffer the image
-                    // Set in_image flag AFTER we return Start(Paragraph) to avoid skipping it
-                    self.in_paragraph = true;
-                    self.buffer.push_back(image_event);
-                    // Set in_image flag now, but Start(Paragraph) is already in the return value
-                    self.in_image = true;
-                    Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
-                } else if self.in_table_cell && self.in_paragraph {
-                    // In table cells and already in a paragraph, just return the image
-                    self.in_image = true;
-                    Some(image_event)
-                } else if self.in_paragraph && !self.in_table_cell {
+                // Set in_image flag to skip alt text
+                self.in_image = true;
+                
+                if self.in_paragraph && !self.in_table_cell {
                     // If we're in a paragraph (but not in a table cell), we need to close it before the image
                     // But we need to check if there's content after the image in the same paragraph
                     // For now, close the paragraph and buffer the image
                     self.buffer.push_back(image_event);
                     self.in_paragraph = false;
                     self.paragraph_closed_for_image = true;
-                    self.in_image = true;
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
                 } else {
-                    // Set in_image flag to skip alt text
-                    self.in_image = true;
                     Some(image_event)
                 }
             },
@@ -331,79 +309,29 @@ where
                 // 3. Typst paragraph start/end (the paragraph containing the image)
                 // BUT: In table cells, we must preserve paragraph tags for TypstMarkup
                 // Keep skipping until we find something that's not part of the image paragraph
-                if self.in_table_cell && self.in_paragraph {
-                    // In table cells, if we're in a paragraph, we need to close it after the image
-                    // Skip alt text and markdown paragraph end, then return paragraph end
-                    loop {
-                        match self.iter.next() {
-                            // Skip alt text (both Markdown and Typst, since ConvertText may have converted it)
-                            Some(ParserEvent::Markdown(markdown::Event::Text(_))) => continue,
-                            Some(ParserEvent::Typst(typst::Event::Text(_))) => continue,
-                            // Skip markdown paragraph end
-                            Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => continue,
-                            // In table cells, if we see a typst paragraph end, return it
-                            Some(event @ ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
-                                self.in_paragraph = false;
-                                break Some(event);
-                            },
-                            // Found something else, create paragraph end and return the other event
-                            other => {
-                                self.in_paragraph = false;
-                                if let Some(event) = other {
-                                    self.buffer.push_back(event);
-                                }
-                                break Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)));
-                            },
-                        }
-                    }
-                } else if self.in_table_cell {
-                    // In table cells but not in paragraph
-                    // This means the image was created without a paragraph start
-                    // We need to create both paragraph start and end for TypstMarkup
-                    // First, skip alt text and markdown paragraph end
-                    loop {
-                        match self.iter.next() {
-                            // Skip alt text (both Markdown and Typst, since ConvertText may have converted it)
-                            Some(ParserEvent::Markdown(markdown::Event::Text(_))) => continue,
-                            Some(ParserEvent::Typst(typst::Event::Text(_))) => continue,
-                            // Skip markdown paragraph end
-                            Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => continue,
-                            // If we see a typst paragraph end, we need to create paragraph start first
-                            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
-                                // Create paragraph start, buffer paragraph end, return paragraph start
-                                self.in_paragraph = true;
-                                self.buffer.push_back(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)));
-                                break Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)));
-                            },
-                            // Found something else, create paragraph start and end, then return the other event
-                            other => {
-                                self.in_paragraph = true;
-                                if let Some(event) = other {
-                                    self.buffer.push_back(event);
-                                }
-                                self.buffer.push_back(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)));
-                                break Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)));
-                            },
-                        }
-                    }
-                } else {
-                    // Not in table cell, skip paragraph tags as before
-                    loop {
-                        match self.iter.next() {
-                            // Skip alt text (both Markdown and Typst, since ConvertText may have converted it)
-                            Some(ParserEvent::Markdown(markdown::Event::Text(_))) => continue,
-                            Some(ParserEvent::Typst(typst::Event::Text(_))) => continue,
-                            // Skip markdown paragraph end
-                            Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => continue,
-                            // Skip typst paragraph tags (the paragraph containing the image)
-                            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => continue,
-                            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
-                                // All wrapped paragraph tags skipped, get next event
-                                break self.next();
-                            },
-                            // Found something else (like a heading), return it
-                            other => break other,
-                        }
+                loop {
+                    match self.iter.next() {
+                        // Skip alt text (both Markdown and Typst, since ConvertText may have converted it)
+                        Some(ParserEvent::Markdown(markdown::Event::Text(_))) => continue,
+                        Some(ParserEvent::Typst(typst::Event::Text(_))) => continue,
+                        // Skip markdown paragraph end
+                        Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => continue,
+                        // Skip typst paragraph tags (the paragraph containing the image)
+                        // BUT: In table cells, preserve paragraph tags
+                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) if !self.in_table_cell => continue,
+                        Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_table_cell => {
+                            // All wrapped paragraph tags skipped, get next event
+                            break self.next();
+                        },
+                        // In table cells, preserve paragraph events
+                        Some(event @ ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) if self.in_table_cell => {
+                            break Some(event);
+                        },
+                        Some(event @ ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if self.in_table_cell => {
+                            break Some(event);
+                        },
+                        // Found something else (like a heading), return it
+                        other => break other,
                     }
                 }
             },
@@ -693,21 +621,12 @@ where
             Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::TableCell))) => {
                 // Track that we're entering a table cell
                 self.in_table_cell = true;
-                // Reset paragraph state when entering a new cell
-                self.in_paragraph = false;
                 Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::TableCell)))
             },
             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::TableCell))) => {
                 // Track that we're exiting a table cell
-                // If we're still in a paragraph, we need to close it first
-                if self.in_paragraph {
-                    self.in_paragraph = false;
-                    self.buffer.push_back(ParserEvent::Typst(typst::Event::End(typst::Tag::TableCell)));
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
-                } else {
-                    self.in_table_cell = false;
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::TableCell)))
-                }
+                self.in_table_cell = false;
+                Some(ParserEvent::Typst(typst::Event::End(typst::Tag::TableCell)))
             },
             x => x,
         }

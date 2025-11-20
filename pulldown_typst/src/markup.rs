@@ -396,20 +396,10 @@ where
             Some(Event::Let(lhs, rhs)) => Some(format!("#let {lhs} = {rhs}\n")),
             Some(Event::FunctionCall(v, f, args)) => {
                 let args = args.join(", ");
-                let content = if let Some(v) = v {
-                    format!("#{v}.{f}({args})\n")
+                if let Some(v) = v {
+                    Some(format!("#{v}.{f}({args})\n"))
                 } else {
-                    format!("#{f}({args})\n")
-                };
-                // If we're in a cell buffer (which means we're in a table cell), accumulate to cell buffer
-                if let Some(ref mut cell_buf) = self.cell_buffer {
-                    cell_buf.push_str(&content);
-                    Some("".to_string())
-                } else if let Some(ref mut buf) = self.row_buffer {
-                    buf.push_str(&content);
-                    Some("".to_string())
-                } else {
-                    Some(content)
+                    Some(format!("#{f}({args})\n"))
                 }
             }
             Some(Event::DocumentFunctionCall(args)) => {
