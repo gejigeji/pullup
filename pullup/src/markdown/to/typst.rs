@@ -148,6 +148,7 @@ pub struct ConvertImages<'a, T> {
     in_image: bool,
     in_paragraph: bool,
     in_heading: bool,  // Track if we're inside a heading
+    in_table_cell: bool,  // Track if we're inside a table cell
     paragraph_closed_for_image: bool,  // Track if we closed a paragraph for an image
     buffer: VecDeque<ParserEvent<'a>>,
     iter: T,
@@ -162,6 +163,7 @@ where
             in_image: false,
             in_paragraph: false,
             in_heading: false,
+            in_table_cell: false,
             paragraph_closed_for_image: false,
             buffer: VecDeque::new(),
             iter,
@@ -282,8 +284,8 @@ where
                 // Set in_image flag to skip alt text
                 self.in_image = true;
                 
-                if self.in_paragraph {
-                    // If we're in a paragraph, we need to close it before the image
+                if self.in_paragraph && !self.in_table_cell {
+                    // If we're in a paragraph (but not in a table cell), we need to close it before the image
                     // But we need to check if there's content after the image in the same paragraph
                     // For now, close the paragraph and buffer the image
                     self.buffer.push_back(image_event);
@@ -601,6 +603,16 @@ where
                             self.buffer.push_back(next_event);
                             Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
                         }
+            },
+            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::TableCell))) => {
+                // Track that we're entering a table cell
+                self.in_table_cell = true;
+                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::TableCell)))
+            },
+            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::TableCell))) => {
+                // Track that we're exiting a table cell
+                self.in_table_cell = false;
+                Some(ParserEvent::Typst(typst::Event::End(typst::Tag::TableCell)))
             },
             x => x,
         }
