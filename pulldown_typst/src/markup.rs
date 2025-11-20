@@ -20,6 +20,7 @@ fn typst_escape(s: &str) -> String {
 pub struct TypstMarkup<'a, T> {
     tag_queue: VecDeque<Tag<'a>>,
     codeblock_queue: VecDeque<()>,
+    row_buffer: Option<String>,
     iter: T,
 }
 
@@ -31,6 +32,7 @@ where
         Self {
             tag_queue: VecDeque::new(),
             codeblock_queue: VecDeque::new(),
+            row_buffer: None,
             iter,
         }
     }
@@ -43,8 +45,21 @@ where
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // If we have a row buffer and it's not empty, we need to handle buffered output first
+        // But actually, we'll handle it when the row ends
+        
         match self.iter.next() {
-            None => None,
+            None => {
+                // If there's remaining buffer, return it
+                if let Some(mut buf) = self.row_buffer.take() {
+                    if buf.ends_with(", ") {
+                        buf.truncate(buf.len() - 2);
+                    }
+                    Some(buf)
+                } else {
+                    None
+                }
+            }
             Some(Event::Start(x)) => {
                 let ret = match x {
                     Tag::Paragraph => Some("#par()[".to_string()),
@@ -126,9 +141,15 @@ where
                             .join(", ");
                         Some(format!("#table(align: [{}])[\n", alignments))
                     }
-                    Tag::TableRow => Some("#row[\n".to_string()),
-                    Tag::TableHead => Some("#row[\n".to_string()),
-                    Tag::TableCell => Some("#cell[".to_string()),
+                    Tag::TableRow => {
+                        self.row_buffer = Some(String::new());
+                        Some("".to_string())
+                    }
+                    Tag::TableHead => {
+                        self.row_buffer = Some(String::new());
+                        Some("".to_string())
+                    }
+                    Tag::TableCell => Some("[".to_string()),
                     _ => todo!(),
                 };
 
@@ -137,7 +158,13 @@ where
                 if ret.is_none() {
                     return Some("".to_string());
                 }
-                ret
+                // If we're in a row buffer, accumulate to buffer instead of returning
+                if let Some(ref mut buf) = self.row_buffer {
+                    buf.push_str(&ret.as_ref().unwrap());
+                    Some("".to_string())
+                } else {
+                    ret
+                }
             }
             Some(Event::End(x)) => {
                 let ret = match x {
@@ -163,35 +190,97 @@ where
                         QuoteType::Block => "]\n".to_string(),
                     }),
                     Tag::Table(_) => Some("]\n".to_string()),
-                    Tag::TableHead => Some("\n]\n".to_string()),
-                    Tag::TableRow => Some("\n]\n".to_string()),
-                    Tag::TableCell => Some("]".to_string()),
+                    Tag::TableHead => {
+                        if let Some(mut buf) = self.row_buffer.take() {
+                            // Remove trailing ", " if present
+                            if buf.ends_with(", ") {
+                                buf.truncate(buf.len() - 2);
+                            }
+                            Some(format!("{}\n", buf))
+                        } else {
+                            Some("\n".to_string())
+                        }
+                    }
+                    Tag::TableRow => {
+                        if let Some(mut buf) = self.row_buffer.take() {
+                            // Remove trailing ", " if present
+                            if buf.ends_with(", ") {
+                                buf.truncate(buf.len() - 2);
+                            }
+                            Some(format!("{}\n", buf))
+                        } else {
+                            Some("\n".to_string())
+                        }
+                    }
+                    Tag::TableCell => {
+                        // Always append "], " - if in buffer, accumulate; otherwise return
+                        if let Some(ref mut buf) = self.row_buffer {
+                            buf.push_str("], ");
+                            Some("".to_string())
+                        } else {
+                            Some("], ".to_string())
+                        }
+                    }
                     _ => todo!(),
                 };
 
                 let in_tag = self.tag_queue.pop_back();
 
                 // Make sure we are in a good state.
-                assert_eq!(in_tag, Some(x));
-                ret
-            }
-            Some(Event::Raw(x)) => Some(x.into_string()),
-            Some(Event::Text(x)) => {
-                if self.codeblock_queue.is_empty() {
-                    Some(typst_escape(&x))
+                assert_eq!(in_tag, Some(x.clone()));
+                
+                // If we're in a row buffer (but not ending the row or cell), accumulate to buffer
+                // Note: TableCell end is already handled in the match above
+                if self.row_buffer.is_some() && !matches!(&x, Tag::TableRow | Tag::TableHead | Tag::TableCell) {
+                    if let Some(ref mut buf) = self.row_buffer {
+                        buf.push_str(&ret.as_ref().unwrap_or(&"".to_string()));
+                        Some("".to_string())
+                    } else {
+                        ret
+                    }
                 } else {
-                    Some(x.into_string())
+                    ret
                 }
             }
-            Some(Event::Code(x)) => Some(format!(
-                "#raw(\"{}\")",
-                x
-                    // "Raw" still needs forward slashes escaped or they will break out of
-                    // the tag.
-                    .replace('\\', r#"\\"#)
-                    // "Raw" still needs quotes escaped or they will prematurely end the tag.
-                    .replace('"', r#"\""#)
-            )),
+            Some(Event::Raw(x)) => {
+                let content = x.into_string();
+                if let Some(ref mut buf) = self.row_buffer {
+                    buf.push_str(&content);
+                    Some("".to_string())
+                } else {
+                    Some(content)
+                }
+            }
+            Some(Event::Text(x)) => {
+                let content = if self.codeblock_queue.is_empty() {
+                    typst_escape(&x)
+                } else {
+                    x.into_string()
+                };
+                if let Some(ref mut buf) = self.row_buffer {
+                    buf.push_str(&content);
+                    Some("".to_string())
+                } else {
+                    Some(content)
+                }
+            }
+            Some(Event::Code(x)) => {
+                let content = format!(
+                    "#raw(\"{}\")",
+                    x
+                        // "Raw" still needs forward slashes escaped or they will break out of
+                        // the tag.
+                        .replace('\\', r#"\\"#)
+                        // "Raw" still needs quotes escaped or they will prematurely end the tag.
+                        .replace('"', r#"\""#)
+                );
+                if let Some(ref mut buf) = self.row_buffer {
+                    buf.push_str(&content);
+                    Some("".to_string())
+                } else {
+                    Some(content)
+                }
+            }
             Some(Event::Linebreak) => Some("#linebreak()\n".to_string()),
             Some(Event::Parbreak) => Some("#parbreak()\n".to_string()),
             Some(Event::PageBreak) => Some("#pagebreak()\n".to_string()),
@@ -536,7 +625,7 @@ mod tests {
 
         let output = TypstMarkup::new(input.into_iter()).collect::<String>();
         let expected =
-            "#table(align: [left, center])[\n#row[\n#cell[Header 1]#cell[Header 2]\n]\n]\n";
+            "#table(align: [left, center])[\n[Header 1], [Header 2]\n]\n";
         assert_eq!(output, expected);
     }
 }
