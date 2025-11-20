@@ -238,8 +238,6 @@ where
                 self.in_image = false;
                 // Skip the end tag and check if there's a following paragraph end that we should also skip
                 // (since we already closed the paragraph before the image)
-                // Also check if there's content after the image that needs a new paragraph
-                // For standalone images, the next event is usually a paragraph end
                 match self.iter.next() {
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image => {
                         // This paragraph end was for the paragraph that contained the image
@@ -249,83 +247,8 @@ where
                     },
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && !self.paragraph_closed_for_image => {
                         // This is an empty paragraph that was created by ConvertParagraphs for a standalone image
-                        // Check if there's content after it (could be after soft break)
-                        // We need to peek ahead to see if there's content
-                        let mut peek_events = Vec::new();
-                        let mut found_content = false;
-                        let mut next_paragraph_start = false;
-                        
-                        // Peek at next events to see if there's content
-                        loop {
-                            match self.iter.next() {
-                                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => {
-                                    next_paragraph_start = true;
-                                    peek_events.push(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)));
-                                    break;
-                                },
-                                Some(break_event @ ParserEvent::Markdown(markdown::Event::SoftBreak)) | Some(break_event @ ParserEvent::Markdown(markdown::Event::HardBreak)) => {
-                                    peek_events.push(break_event);
-                                    // Continue to check next event after break
-                                    continue;
-                                },
-                                Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
-                                    found_content = true;
-                                    peek_events.push(next_event);
-                                    // Continue to check if there's a paragraph end after the text
-                                    match self.iter.next() {
-                                        Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
-                                            peek_events.push(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)));
-                                        },
-                                        other => {
-                                            if let Some(event) = other {
-                                                peek_events.push(event);
-                                            }
-                                        },
-                                    }
-                                    break;
-                                },
-                                other => {
-                                    if let Some(event) = other {
-                                        peek_events.push(event);
-                                    }
-                                    break;
-                                },
-                            }
-                        }
-                        
-                        // Put back all peeked events in reverse order
-                        for event in peek_events.into_iter().rev() {
-                            self.buffer.push_front(event);
-                        }
-                        
-                        if next_paragraph_start {
-                            // There's a new paragraph after the image
-                            self.in_paragraph = true;
-                            None  // Skip the empty paragraph end
-                        } else if found_content {
-                            // There's content after the image, create a new paragraph for it
-                            self.in_paragraph = true;
-                            // Return paragraph start immediately, content is already in buffer
-                            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
-                        } else {
-                            // No content after, just skip the empty paragraph
-                            None
-                        }
-                    },
-                    Some(ParserEvent::Markdown(markdown::Event::SoftBreak)) | Some(ParserEvent::Markdown(markdown::Event::HardBreak)) if !self.in_paragraph && !self.paragraph_closed_for_image => {
-                        // After a standalone image, if we see a break followed by content, create a paragraph
-                        match self.iter.next() {
-                            Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
-                                self.in_paragraph = true;
-                                self.buffer.push_back(next_event);
-                                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
-                            },
-                            other => {
-                                // Put back the break and return other event
-                                self.buffer.push_back(self.iter.next().unwrap());
-                                other
-                            },
-                        }
+                        // Skip it to avoid generating #par()[]
+                        None
                     },
                     Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => {
                         // This is a markdown paragraph end that comes after the image
