@@ -904,11 +904,36 @@ where
             // When we see a paragraph end (either Markdown or Typst), check if the next event is a paragraph start
             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) |
             Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => {
-                // Skip any SoftBreak or HardBreak events between paragraphs
+                // Skip any events between paragraphs that don't start a new block element
+                // This includes: SoftBreak, HardBreak, Text (whitespace), and Typst Text (whitespace)
                 let mut next_event = self.iter.next();
-                while let Some(ParserEvent::Markdown(markdown::Event::SoftBreak)) |
-                      Some(ParserEvent::Markdown(markdown::Event::HardBreak)) = next_event {
-                    next_event = self.iter.next();
+                loop {
+                    match next_event {
+                        // Skip soft breaks
+                        Some(ParserEvent::Markdown(markdown::Event::SoftBreak)) |
+                        Some(ParserEvent::Markdown(markdown::Event::HardBreak)) => {
+                            next_event = self.iter.next();
+                            continue;
+                        },
+                        // Skip whitespace-only text
+                        Some(ParserEvent::Markdown(markdown::Event::Text(ref t))) |
+                        Some(ParserEvent::Typst(typst::Event::Text(ref t))) => {
+                            if t.trim().is_empty() {
+                                next_event = self.iter.next();
+                                continue;
+                            } else {
+                                // Non-whitespace text, stop skipping
+                                break;
+                            }
+                        },
+                        // Skip Typst Linebreak events (they might be inserted by other converters)
+                        Some(ParserEvent::Typst(typst::Event::Linebreak)) => {
+                            next_event = self.iter.next();
+                            continue;
+                        },
+                        // Any other event, stop skipping
+                        _ => break,
+                    }
                 }
                 
                 // Now check if it's a paragraph start
