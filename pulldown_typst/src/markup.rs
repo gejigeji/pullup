@@ -236,15 +236,37 @@ where
                             // Replace <br> with \n
                             cell_content = cell_content.replace("<br>", "\\n").replace("<br/>", "\\n").replace("<br />", "\\n");
                             
-                            // Escape // to \/\/ and * to \* for table cells
-                            cell_content = cell_content.replace("//", "\\/\\/").replace('*', "\\*");
+                            // Escape // to \/\/ for table cells
+                            cell_content = cell_content.replace("//", "\\/\\/");
+                            
+                            // Escape * to \* for table cells, but avoid double-escaping
+                            // If content came from Event::Text, * is already escaped as \*
+                            // If content came from Event::Raw, * needs to be escaped
+                            // We replace * only if it's not already escaped (not preceded by \)
+                            let mut result = String::with_capacity(cell_content.len() * 2);
+                            let mut chars = cell_content.chars().peekable();
+                            while let Some(ch) = chars.next() {
+                                if ch == '*' {
+                                    // Check if previous char was a backslash
+                                    if result.ends_with('\\') {
+                                        // Already escaped, keep as is
+                                        result.push(ch);
+                                    } else {
+                                        // Not escaped, escape it
+                                        result.push_str("\\*");
+                                    }
+                                } else {
+                                    result.push(ch);
+                                }
+                            }
+                            cell_content = result;
                             
                             // Trim whitespace
                             cell_content = cell_content.trim().to_string();
                             
                             // Check if cell content contains Typst markup (starts with #)
                             // If it's plain text, wrap in quotes; otherwise use as-is
-                            let needs_quotes = !cell_content.trim_start().starts_with('#') 
+                            let _needs_quotes = !cell_content.trim_start().starts_with('#') 
                                 && !cell_content.contains("#emph")
                                 && !cell_content.contains("#strong")
                                 && !cell_content.contains("#link");
@@ -736,5 +758,63 @@ mod tests {
         // Each cell should be in separate array elements
         let expected = "#table(\n  columns: 3,\n  [序号], [版本], [版本号],\n  [1], [V1.0], [1],\n)\n";
         assert_eq!(output, expected, "Cells should be properly separated");
+    }
+
+    #[test]
+    fn table_escapes_forward_slash() {
+        let input = vec![
+            Event::Start(Tag::Table(vec![TableCellAlignment::None, TableCellAlignment::None])),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("comment // test".into()),
+            Event::End(Tag::TableCell),
+            Event::Start(Tag::TableCell),
+            Event::Text("path/to/file".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::Table(vec![TableCellAlignment::None, TableCellAlignment::None])),
+        ];
+
+        let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+        // Only // should be escaped to \/\/, single / should remain unchanged
+        let expected = "#table(\n  columns: 2,\n  [comment \\/\\/ test], [path/to/file],\n)\n";
+        assert_eq!(output, expected, "Double forward slashes should be escaped in table cells");
+    }
+
+    #[test]
+    fn table_escapes_asterisk() {
+        let input = vec![
+            Event::Start(Tag::Table(vec![TableCellAlignment::None, TableCellAlignment::None])),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("bold *text*".into()),
+            Event::End(Tag::TableCell),
+            Event::Start(Tag::TableCell),
+            Event::Text("item*1".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::Table(vec![TableCellAlignment::None, TableCellAlignment::None])),
+        ];
+
+        let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+        let expected = "#table(\n  columns: 2,\n  [bold \\*text\\*], [item\\*1],\n)\n";
+        assert_eq!(output, expected, "Asterisks should be escaped in table cells");
+    }
+
+    #[test]
+    fn table_escapes_both_forward_slash_and_asterisk() {
+        let input = vec![
+            Event::Start(Tag::Table(vec![TableCellAlignment::None])),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("comment // test *bold*".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::Table(vec![TableCellAlignment::None])),
+        ];
+
+        let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+        let expected = "#table(\n  columns: 1,\n  [comment \\/\\/ test \\*bold\\*],\n)\n";
+        assert_eq!(output, expected, "Both forward slashes and asterisks should be escaped in table cells");
     }
 }
