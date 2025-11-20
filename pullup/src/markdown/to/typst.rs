@@ -868,65 +868,6 @@ converter!(
     }
 });
 
-/// Merge consecutive paragraphs into a single paragraph with linebreaks.
-/// When a paragraph ends and is immediately followed by another paragraph start,
-/// merge them by skipping the paragraph end/start and inserting a linebreak.
-pub struct MergeConsecutiveParagraphs<'a, T> {
-    iter: T,
-    buffer: VecDeque<ParserEvent<'a>>,
-}
-
-impl<'a, T> MergeConsecutiveParagraphs<'a, T>
-where
-    T: Iterator<Item = ParserEvent<'a>>,
-{
-    pub fn new(iter: T) -> Self {
-        MergeConsecutiveParagraphs {
-            iter,
-            buffer: VecDeque::new(),
-        }
-    }
-}
-
-impl<'a, T> Iterator for MergeConsecutiveParagraphs<'a, T>
-where
-    T: Iterator<Item = ParserEvent<'a>>,
-{
-    type Item = ParserEvent<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // Return buffered events first
-        if let Some(event) = self.buffer.pop_front() {
-            return Some(event);
-        }
-
-        match self.iter.next() {
-            // When we see a paragraph end (either Markdown or Typst), check if the next event is a paragraph start
-            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) |
-            Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => {
-                // Peek at the next event
-                match self.iter.next() {
-                    // If it's a paragraph start (either Markdown or Typst), skip both end and start, insert linebreak
-                    Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) |
-                    Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Paragraph))) => {
-                        // Insert linebreak instead of closing the paragraph
-                        Some(ParserEvent::Typst(typst::Event::Linebreak))
-                    },
-                    // Otherwise, put back the event and return the paragraph end
-                    other => {
-                        if let Some(event) = other {
-                            self.buffer.push_back(event);
-                        }
-                        // Return the original paragraph end event
-                        Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
-                    },
-                }
-            },
-            x => x,
-        }
-    }
-}
-
 converter!(
     /// Convert Markdown blockquotes to Typst quotes.
     ConvertBlockQuotes,
