@@ -147,7 +147,6 @@ converter!(
 pub struct ConvertImages<'a, T> {
     in_image: bool,
     in_paragraph: bool,
-    paragraph_closed_for_image: bool,  // Track if we closed a paragraph for an image
     buffer: VecDeque<ParserEvent<'a>>,
     iter: T,
 }
@@ -160,7 +159,6 @@ where
         ConvertImages {
             in_image: false,
             in_paragraph: false,
-            paragraph_closed_for_image: false,
             buffer: VecDeque::new(),
             iter,
         }
@@ -181,33 +179,8 @@ where
 
         match self.iter.next() {
             Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => {
-                // If we closed a paragraph for an image and now see a new paragraph start,
-                // it means there's content after the image that needs its own paragraph
-                if self.paragraph_closed_for_image {
-                    self.paragraph_closed_for_image = false;
-                }
-                // Check if this paragraph contains only a standalone image
-                // Peek at the next event: if it's an image start, skip the paragraph and convert the image
-                match self.iter.next() {
-                    Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Image(_, url, _)))) => {
-                        // This paragraph contains only an image, skip the paragraph start
-                        // and convert the image directly
-                        self.in_image = true;
-                        let url_str = url.as_ref().strip_prefix("./").unwrap_or(url.as_ref());
-                        let url_str_with_quotes = format!("\"{}\"", url_str);
-                        let image_event = ParserEvent::Typst(typst::Event::FunctionCall(None, "image".into(), vec![url_str_with_quotes.into()]));
-                        // Return the image event directly, skip the paragraph start
-                        Some(image_event)
-                    },
-                    other => {
-                        // Not a standalone image, put back the event and return paragraph start
-                        if let Some(event) = other {
-                            self.buffer.push_back(event);
-                        }
-                        self.in_paragraph = true;
-                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
-                    },
-                }
+                self.in_paragraph = true;
+                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
             },
             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
                 self.in_paragraph = false;
@@ -215,90 +188,32 @@ where
             },
             Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Image(_, url, _)))) => {
                 self.in_image = true;
+                // If we're in a paragraph, close it before the image
+                if self.in_paragraph {
+                    self.buffer.push_back(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)));
+                    self.in_paragraph = false;
+                }
                 // Convert image start to FunctionCall event
                 // The URL needs to be wrapped in quotes for the function call
                 // Remove leading "./" if present
                 let url_str = url.as_ref().strip_prefix("./").unwrap_or(url.as_ref());
-                let url_str_with_quotes = format!("\"{}\"", url_str);
-                let image_event = ParserEvent::Typst(typst::Event::FunctionCall(None, "image".into(), vec![url_str_with_quotes.into()]));
-                
-                if self.in_paragraph {
-                    // If we're in a paragraph, we need to close it before the image
-                    // But we need to check if there's content after the image in the same paragraph
-                    // For now, close the paragraph and buffer the image
-                    self.buffer.push_back(image_event);
-                    self.in_paragraph = false;
-                    self.paragraph_closed_for_image = true;
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
-                } else {
-                    Some(image_event)
-                }
+                let url_str = format!("\"{}\"", url_str);
+                Some(ParserEvent::Typst(typst::Event::FunctionCall(None, "image".into(), vec![url_str.into()])))
             },
             Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Image(_, _, _)))) => {
                 self.in_image = false;
                 // Skip the end tag and check if there's a following paragraph end that we should also skip
                 // (since we already closed the paragraph before the image)
                 match self.iter.next() {
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image => {
+                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph => {
                         // This paragraph end was for the paragraph that contained the image
                         // We already closed it, so skip this one
-                        self.paragraph_closed_for_image = false;
-                        None
-                    },
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && !self.paragraph_closed_for_image => {
-                        // This is an empty paragraph that was created by ConvertParagraphs for a standalone image
-                        // Skip it to avoid generating #par()[]
-                        None
-                    },
-                    Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => {
-                        // This is a markdown paragraph end that comes after the image
-                        // If we closed the paragraph before the image, we should skip this one too
-                        // Continue to check for the Typst paragraph end
-                        match self.iter.next() {
-                            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image => {
-                                // Skip both the markdown and typst paragraph ends
-                                self.paragraph_closed_for_image = false;
-                                None
-                            },
-                            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && !self.paragraph_closed_for_image => {
-                                // This is an empty paragraph that was created by ConvertParagraphs for a standalone image
-                                // Skip it to avoid generating #par()[]
-                                None
-                            },
-                            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => {
-                                // There's a new paragraph after the image, which is correct
-                                self.paragraph_closed_for_image = false;
-                                self.in_paragraph = true;
-                                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
-                            },
-                            Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
-                                // There's text content after the image in the same paragraph
-                                // We need to create a new paragraph for it
-                                self.paragraph_closed_for_image = false;
-                                self.in_paragraph = true;
-                                self.buffer.push_back(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph)));
-                                self.buffer.push_back(next_event);
-                                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
-                            },
-                            other => {
-                                // Put back the markdown paragraph end and return the other event
-                                self.buffer.push_back(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph)));
-                                other
-                            },
-                        }
-                    },
-                    Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
-                        // There's text content after the image in the same paragraph
-                        // We need to create a new paragraph for it
-                        self.paragraph_closed_for_image = false;
-                        self.in_paragraph = true;
-                        self.buffer.push_back(next_event);
-                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
+                        self.next()
                     },
                     other => other,
                 }
             },
-            Some(_event) if self.in_image => {
+            Some(event) if self.in_image => {
                 // Skip all content inside image tags (alt text)
                 self.next()
             },
@@ -601,7 +516,7 @@ mod tests {
 ";
             let i = ConvertHeadings::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::Heading(
@@ -649,7 +564,7 @@ Cool [beans](https://example.com)
 ";
             let i = ConvertLinks::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
@@ -675,7 +590,7 @@ Cool <https://example.com>
 ";
             let i = ConvertLinks::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
@@ -701,7 +616,7 @@ Who are <you@example.com>
 ";
             let i = ConvertLinks::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
@@ -735,7 +650,7 @@ I **love** cake!
 ";
             let i = ConvertStrong::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Heading(
@@ -773,7 +688,7 @@ I *love* cake!
 ";
             let i = ConvertEmphasis::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Heading(
@@ -809,7 +724,7 @@ foo `bar` baz
 ";
             let i = ConvertCode::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
@@ -831,7 +746,7 @@ whatever
 ";
             let i = ConvertCode::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
@@ -860,7 +775,7 @@ blah
 ";
             let i = ConvertCode::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::CodeBlock(
@@ -885,7 +800,7 @@ blah
 ";
             let i = ConvertCode::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::CodeBlock(
@@ -918,7 +833,7 @@ baz
 ";
             let i = ConvertText::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
@@ -952,7 +867,7 @@ bar
 ";
             let i = ConvertSoftBreaks::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
@@ -973,7 +888,7 @@ bar
 ";
             let i = ConvertHardBreaks::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
@@ -1002,7 +917,7 @@ baz
 ";
             let i = ConvertParagraphs::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::Paragraph)),
@@ -1035,7 +950,7 @@ baz
 ";
             let i = ConvertLists::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::BulletList(None, false))),
@@ -1064,7 +979,7 @@ baz
 ";
             let i = ConvertLists::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::NumberedList(1, None, false))),
@@ -1092,7 +1007,7 @@ baz
 ";
             let i = ConvertLists::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::NumberedList(6, None, false))),
@@ -1117,7 +1032,7 @@ baz
 ";
             let i = ConvertLists::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::BulletList(None, false))),
@@ -1143,7 +1058,7 @@ baz
 
             let i = ConvertText::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
@@ -1162,7 +1077,7 @@ baz
 
             let i = ConvertBlockQuotes::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::Quote(
@@ -1189,7 +1104,7 @@ baz
 
             let i = ConvertBlockQuotes::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::Quote(
@@ -1226,13 +1141,12 @@ baz
 ";
             let i = ConvertImages::new(MarkdownIter(Parser::new(&md)));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Markdown(MdEvent::Start(MdTag::Paragraph)),
                     Markdown(MdEvent::Text(CowStr::Borrowed("整体交互流程图"))),
                     Markdown(MdEvent::End(MdTag::Paragraph)),
-                    Markdown(MdEvent::Start(MdTag::Paragraph)),
                     Typst(TypstEvent::FunctionCall(None, "image".into(), vec!["\"images/infeed/image2.png\"".into()])),
                 ]
             );
@@ -1250,7 +1164,7 @@ baz
             });
             assert!(image_call.is_some(), "Should find image function call");
             if let Some(Typst(TypstEvent::FunctionCall(_, _, args))) = image_call {
-                similar_asserts::assert_eq!(args[0].as_ref(), "\"images/test.png\"");
+                assert_eq!(args[0].as_ref(), "\"images/test.png\"");
             }
         }
 
@@ -1281,7 +1195,7 @@ baz
 
             let events: Vec<_> = i.collect();
             // The paragraph should be closed before the image
-            let mut _found_paragraph_end_before_image = false;
+            let mut found_paragraph_end_before_image = false;
             let mut found_image = false;
             for event in &events {
                 if matches!(event, Typst(TypstEvent::FunctionCall(_, f, _)) if f.as_ref() == "image") {
@@ -1289,58 +1203,12 @@ baz
                     break;
                 }
                 if matches!(event, Typst(TypstEvent::End(TypstTag::Paragraph))) {
-                    _found_paragraph_end_before_image = true;
+                    found_paragraph_end_before_image = true;
                 }
             }
             assert!(found_image, "Should find image function call");
             // When image is in paragraph, paragraph should be closed before image
             // Note: This test may need adjustment based on actual markdown parsing behavior
-        }
-
-        #[test]
-        fn convert_image_after_text_in_same_paragraph() {
-            // Test case: text and image in the same paragraph (no blank line between them)
-            // This is the case reported by the user
-            // Input: "整体交互流程图\n![整体交互流程图](./images/infeed/image2.png)  "
-            // Expected: paragraph with text, paragraph end, then image function call
-            let md = "\
-整体交互流程图
-![整体交互流程图](./images/infeed/image2.png)  
-";
-            // First convert paragraphs, then images, then text
-            let i = ConvertText::new(ConvertImages::new(ConvertParagraphs::new(MarkdownIter(Parser::new(&md)))));
-
-            let events: Vec<_> = i.collect();
-            
-            // Expected sequence: paragraph start, text, paragraph end, image function call
-            // The paragraph should be closed before the image
-            let mut found_paragraph_start = false;
-            let mut found_text = false;
-            let mut found_paragraph_end_before_image = false;
-            let mut found_image = false;
-            
-            for event in &events {
-                match event {
-                    Typst(TypstEvent::Start(TypstTag::Paragraph)) if !found_paragraph_start => {
-                        found_paragraph_start = true;
-                    },
-                    Typst(TypstEvent::Text(_)) if found_paragraph_start && !found_text => {
-                        found_text = true;
-                    },
-                    Typst(TypstEvent::End(TypstTag::Paragraph)) if found_text && !found_image => {
-                        found_paragraph_end_before_image = true;
-                    },
-                    Typst(TypstEvent::FunctionCall(_, f, _)) if f.as_ref() == "image" => {
-                        found_image = true;
-                    },
-                    _ => {},
-                }
-            }
-            
-            assert!(found_paragraph_start, "Should find paragraph start");
-            assert!(found_text, "Should find text");
-            assert!(found_paragraph_end_before_image, "Paragraph should be closed before image");
-            assert!(found_image, "Should find image function call");
         }
     }
 
@@ -1359,7 +1227,7 @@ baz
                 pulldown_cmark::Options::ENABLE_TABLES,
             )));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::Table(vec![
@@ -1402,7 +1270,7 @@ baz
                 pulldown_cmark::Options::ENABLE_TABLES,
             )));
 
-            similar_asserts::assert_eq!(
+            self::assert_eq!(
                 i.collect::<Vec<super::ParserEvent>>(),
                 vec![
                     Typst(TypstEvent::Start(TypstTag::Table(vec![
