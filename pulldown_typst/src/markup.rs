@@ -236,6 +236,9 @@ where
                             // Replace <br> with \n
                             cell_content = cell_content.replace("<br>", "\\n").replace("<br/>", "\\n").replace("<br />", "\\n");
                             
+                            // Escape // to \/\/ and * to \* for table cells
+                            cell_content = cell_content.replace("//", "\\/\\/").replace('*', "\\*");
+                            
                             // Trim whitespace
                             cell_content = cell_content.trim().to_string();
                             
