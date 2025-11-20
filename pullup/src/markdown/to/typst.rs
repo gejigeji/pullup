@@ -904,8 +904,15 @@ where
             // When we see a paragraph end (either Markdown or Typst), check if the next event is a paragraph start
             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) |
             Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => {
-                // Peek at the next event
-                match self.iter.next() {
+                // Skip any SoftBreak or HardBreak events between paragraphs
+                let mut next_event = self.iter.next();
+                while let Some(ParserEvent::Markdown(markdown::Event::SoftBreak)) |
+                      Some(ParserEvent::Markdown(markdown::Event::HardBreak)) = next_event {
+                    next_event = self.iter.next();
+                }
+                
+                // Now check if it's a paragraph start
+                match next_event {
                     // If it's a paragraph start (either Markdown or Typst), skip both end and start, insert linebreak
                     Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) |
                     Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Paragraph))) => {
