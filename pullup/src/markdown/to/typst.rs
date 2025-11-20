@@ -147,6 +147,7 @@ converter!(
 pub struct ConvertImages<'a, T> {
     in_image: bool,
     in_paragraph: bool,
+    paragraph_closed_for_image: bool,  // Track if we closed a paragraph for an image
     buffer: VecDeque<ParserEvent<'a>>,
     iter: T,
 }
@@ -159,6 +160,7 @@ where
         ConvertImages {
             in_image: false,
             in_paragraph: false,
+            paragraph_closed_for_image: false,
             buffer: VecDeque::new(),
             iter,
         }
@@ -179,8 +181,33 @@ where
 
         match self.iter.next() {
             Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => {
-                self.in_paragraph = true;
-                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
+                // If we closed a paragraph for an image and now see a new paragraph start,
+                // it means there's content after the image that needs its own paragraph
+                if self.paragraph_closed_for_image {
+                    self.paragraph_closed_for_image = false;
+                }
+                // Check if this paragraph contains only a standalone image
+                // Peek at the next event: if it's an image start, skip the paragraph and convert the image
+                match self.iter.next() {
+                    Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Image(_, url, _)))) => {
+                        // This paragraph contains only an image, skip the paragraph start
+                        // and convert the image directly
+                        self.in_image = true;
+                        let url_str = url.as_ref().strip_prefix("./").unwrap_or(url.as_ref());
+                        let url_str_with_quotes = format!("\"{}\"", url_str);
+                        let image_event = ParserEvent::Typst(typst::Event::FunctionCall(None, "image".into(), vec![url_str_with_quotes.into()]));
+                        // Return the image event directly, skip the paragraph start
+                        Some(image_event)
+                    },
+                    other => {
+                        // Not a standalone image, put back the event and return paragraph start
+                        if let Some(event) = other {
+                            self.buffer.push_back(event);
+                        }
+                        self.in_paragraph = true;
+                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
+                    },
+                }
             },
             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
                 self.in_paragraph = false;
@@ -195,10 +222,13 @@ where
                 let url_str_with_quotes = format!("\"{}\"", url_str);
                 let image_event = ParserEvent::Typst(typst::Event::FunctionCall(None, "image".into(), vec![url_str_with_quotes.into()]));
                 
-                // If we're in a paragraph, close it before the image
                 if self.in_paragraph {
+                    // If we're in a paragraph, we need to close it before the image
+                    // But we need to check if there's content after the image in the same paragraph
+                    // For now, close the paragraph and buffer the image
                     self.buffer.push_back(image_event);
                     self.in_paragraph = false;
+                    self.paragraph_closed_for_image = true;
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
                 } else {
                     Some(image_event)
@@ -208,11 +238,16 @@ where
                 self.in_image = false;
                 // Skip the end tag and check if there's a following paragraph end that we should also skip
                 // (since we already closed the paragraph before the image)
-                // We need to skip the paragraph end if we already closed the paragraph before the image
                 match self.iter.next() {
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph => {
+                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image => {
                         // This paragraph end was for the paragraph that contained the image
                         // We already closed it, so skip this one
+                        self.paragraph_closed_for_image = false;
+                        None
+                    },
+                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && !self.paragraph_closed_for_image => {
+                        // This is an empty paragraph that was created by ConvertParagraphs for a standalone image
+                        // Skip it to avoid generating #par()[]
                         None
                     },
                     Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => {
@@ -220,9 +255,30 @@ where
                         // If we closed the paragraph before the image, we should skip this one too
                         // Continue to check for the Typst paragraph end
                         match self.iter.next() {
-                            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph => {
+                            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image => {
                                 // Skip both the markdown and typst paragraph ends
+                                self.paragraph_closed_for_image = false;
                                 None
+                            },
+                            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && !self.paragraph_closed_for_image => {
+                                // This is an empty paragraph that was created by ConvertParagraphs for a standalone image
+                                // Skip it to avoid generating #par()[]
+                                None
+                            },
+                            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => {
+                                // There's a new paragraph after the image, which is correct
+                                self.paragraph_closed_for_image = false;
+                                self.in_paragraph = true;
+                                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
+                            },
+                            Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
+                                // There's text content after the image in the same paragraph
+                                // We need to create a new paragraph for it
+                                self.paragraph_closed_for_image = false;
+                                self.in_paragraph = true;
+                                self.buffer.push_back(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph)));
+                                self.buffer.push_back(next_event);
+                                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
                             },
                             other => {
                                 // Put back the markdown paragraph end and return the other event
@@ -230,6 +286,14 @@ where
                                 other
                             },
                         }
+                    },
+                    Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
+                        // There's text content after the image in the same paragraph
+                        // We need to create a new paragraph for it
+                        self.paragraph_closed_for_image = false;
+                        self.in_paragraph = true;
+                        self.buffer.push_back(next_event);
+                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
                     },
                     other => other,
                 }
