@@ -682,10 +682,6 @@ where
                         // If we're in a heading, just return the text without creating a paragraph
                         if self.in_heading {
                             Some(next_event)
-                        } else if self.in_table_cell {
-                            // In table cells, text should already be in a paragraph (created by ConvertParagraphs)
-                            // Just return the text as-is
-                            Some(next_event)
                         } else {
                             // We need to create a new paragraph for it
                             self.paragraph_closed_for_image = false;
@@ -706,7 +702,6 @@ where
                 // If we're still in a paragraph, we need to close it first
                 if self.in_paragraph {
                     self.in_paragraph = false;
-                    self.in_table_cell = false;
                     self.buffer.push_back(ParserEvent::Typst(typst::Event::End(typst::Tag::TableCell)));
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
                 } else {
