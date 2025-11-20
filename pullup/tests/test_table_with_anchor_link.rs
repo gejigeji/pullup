@@ -27,7 +27,6 @@ Ack消息的重发逻辑：
     
     // IMPORTANT: MergeConsecutiveParagraphs MUST be used!
     // The correct converter chain should include MergeConsecutiveParagraphs
-    // Also need ConvertHeadings to convert headings properly
     let events = MergeConsecutiveParagraphs::new(
         ConvertLinks::new(
             ConvertImages::new(
@@ -35,13 +34,11 @@ Ack消息的重发逻辑：
                     ConvertHardBreaks::new(
                         ConvertSoftBreaks::new(
                             ConvertParagraphs::new(
-                                ConvertHeadings::new(
-                                    ConvertTables::new(
-                                        MarkdownIter(Parser::new_ext(
-                                            &md,
-                                            pulldown_cmark::Options::ENABLE_TABLES,
-                                        ))
-                                    )
+                                ConvertTables::new(
+                                    MarkdownIter(Parser::new_ext(
+                                        &md,
+                                        pulldown_cmark::Options::ENABLE_TABLES,
+                                    ))
                                 )
                             )
                         )
