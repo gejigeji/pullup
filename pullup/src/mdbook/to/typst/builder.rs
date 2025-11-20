@@ -145,11 +145,11 @@ where
             if this.code {
                 events = Box::new(ConvertCode::new(events));
             }
-            if this.links {
-                events = Box::new(ConvertLinks::new(events));
-            }
             if this.tables {
                 events = Box::new(ConvertTables::new(events));
+            }
+            if this.links {
+                events = Box::new(ConvertLinks::new(events));
             }
             if this.images {
                 events = Box::new(ConvertImages::new(events));
