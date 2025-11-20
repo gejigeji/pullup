@@ -263,9 +263,24 @@ where
                     if self.paragraph_closed_for_image {
                         self.paragraph_closed_for_image = false;
                     }
-                    // Check if this paragraph contains only a standalone image
-                    // Peek at the next event: if it's an image start, skip the paragraph and convert the image
+                    // Check if this paragraph contains a table or a standalone image
+                    // Tables should not be inside paragraphs in Typst
+                    // Peek at the next event: if it's a table or image start, skip the paragraph
                     match self.iter.next() {
+                    Some(table_event @ ParserEvent::Typst(typst::Event::Start(typst::Tag::Table(_)))) => {
+                        // Table found - close the paragraph first, then return the table start
+                        // Put the table start back in the buffer and return paragraph end
+                        self.buffer.push_back(table_event);
+                        self.in_paragraph = false;
+                        Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
+                    },
+                    Some(table_event @ ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Table(_)))) => {
+                        // Markdown table found - close the paragraph
+                        // The table will be converted by ConvertTables, so we just need to close the paragraph
+                        self.buffer.push_back(table_event);
+                        self.in_paragraph = false;
+                        Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
+                    },
                     Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Image(_, url, _)))) => {
                         // This paragraph contains only an image, skip the paragraph start
                         // and convert the image directly
@@ -803,6 +818,27 @@ where
                 } else {
                     self.in_code_block = false;
                     Some(ParserEvent::Typst(typst::Event::End(typst::Tag::CodeBlock(lang, display))))
+                }
+            },
+            Some(table_event @ ParserEvent::Typst(typst::Event::Start(typst::Tag::Table(_)))) => {
+                // Tables should not be inside paragraphs in Typst
+                // If we're in a paragraph, close it first
+                if self.in_paragraph && !self.in_table_cell {
+                    self.in_paragraph = false;
+                    self.buffer.push_back(table_event);
+                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
+                } else {
+                    Some(table_event)
+                }
+            },
+            Some(table_event @ ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Table(_)))) => {
+                // Markdown table - if we're in a paragraph, close it first
+                if self.in_paragraph && !self.in_table_cell {
+                    self.in_paragraph = false;
+                    self.buffer.push_back(table_event);
+                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
+                } else {
+                    Some(table_event)
                 }
             },
             x => x,

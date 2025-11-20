@@ -108,9 +108,22 @@ where
                     }
                     Tag::Emphasis => Some("#emph[".to_string()),
                     Tag::Strong => Some("#strong[".to_string()),
-                    Tag::Link(ref ty, ref url) => match ty {
-                        LinkType::Content => Some(format!("#link(\"{url}\")[")),
-                        LinkType::Url | LinkType::Autolink => Some(format!("#link(\"{url}\")[")),
+                    Tag::Link(ref ty, ref url) => {
+                        let url_str = url.as_ref();
+                        // If URL starts with #, it's an anchor link - use <label> syntax instead of string
+                        if url_str.starts_with('#') {
+                            // Remove the leading # for the label
+                            let label = &url_str[1..];
+                            match ty {
+                                LinkType::Content => Some(format!("#link(<{label}>)[")),
+                                LinkType::Url | LinkType::Autolink => Some(format!("#link(<{label}>)[")),
+                            }
+                        } else {
+                            match ty {
+                                LinkType::Content => Some(format!("#link(\"{url}\")[")),
+                                LinkType::Url | LinkType::Autolink => Some(format!("#link(\"{url}\")[")),
+                            }
+                        }
                     },
                     Tag::Quote(ref ty, ref quotes, ref attribution) => {
                         let block = match ty {
@@ -543,6 +556,19 @@ mod tests {
             ];
             let output = TypstMarkup::new(input.into_iter()).collect::<String>();
             let expected = "#link(\"http://example.com\")[\\*blah\\*]";
+            assert_eq!(&output, &expected);
+        }
+
+        #[test]
+        fn anchor_link_uses_label_syntax() {
+            let input = vec![
+                Event::Start(Tag::Link(LinkType::Content, "#附录五-分拣机机器类型表".into())),
+                Event::Text("分拣机机器类型表".into()),
+                Event::End(Tag::Link(LinkType::Content, "#附录五-分拣机机器类型表".into())),
+            ];
+            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+            // Anchor links (starting with #) should use <label> syntax instead of string
+            let expected = "#link(<附录五-分拣机机器类型表>)[分拣机机器类型表]";
             assert_eq!(&output, &expected);
         }
     }
