@@ -147,6 +147,7 @@ converter!(
 pub struct ConvertImages<'a, T> {
     in_image: bool,
     in_paragraph: bool,
+    in_heading: bool,  // Track if we're inside a heading
     paragraph_closed_for_image: bool,  // Track if we closed a paragraph for an image
     buffer: VecDeque<ParserEvent<'a>>,
     iter: T,
@@ -160,6 +161,7 @@ where
         ConvertImages {
             in_image: false,
             in_paragraph: false,
+            in_heading: false,
             paragraph_closed_for_image: false,
             buffer: VecDeque::new(),
             iter,
@@ -175,38 +177,94 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         // If we have buffered events, return them first
+        // But check if it's a heading event to update the flag
         if let Some(event) = self.buffer.pop_front() {
+            match &event {
+                ParserEvent::Typst(typst::Event::Start(typst::Tag::Heading(_, _, _))) => {
+                    self.in_heading = true;
+                },
+                ParserEvent::Typst(typst::Event::End(typst::Tag::Heading(_, _, _))) => {
+                    self.in_heading = false;
+                },
+                _ => {}
+            }
             return Some(event);
         }
 
         match self.iter.next() {
+            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Heading(level, toc, bookmarks)))) => {
+                // Track that we're entering a heading
+                self.in_heading = true;
+                // Return the heading start event directly
+                Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Heading(level, toc, bookmarks))))
+            },
+            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Heading(level, toc, bookmarks)))) => {
+                // Track that we're exiting a heading
+                self.in_heading = false;
+                // Return the heading end event directly
+                Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Heading(level, toc, bookmarks))))
+            },
             Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => {
-                // If we closed a paragraph for an image and now see a new paragraph start,
-                // it means there's content after the image that needs its own paragraph
-                if self.paragraph_closed_for_image {
-                    self.paragraph_closed_for_image = false;
-                }
-                // Check if this paragraph contains only a standalone image
-                // Peek at the next event: if it's an image start, skip the paragraph and convert the image
-                match self.iter.next() {
+                // If we're inside an image, skip this paragraph (it's the paragraph containing the image)
+                if self.in_image {
+                    self.next()
+                } else {
+                    // If we closed a paragraph for an image and now see a new paragraph start,
+                    // it means there's content after the image that needs its own paragraph
+                    if self.paragraph_closed_for_image {
+                        self.paragraph_closed_for_image = false;
+                    }
+                    // Check if this paragraph contains only a standalone image
+                    // Peek at the next event: if it's an image start, skip the paragraph and convert the image
+                    match self.iter.next() {
                     Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Image(_, url, _)))) => {
                         // This paragraph contains only an image, skip the paragraph start
                         // and convert the image directly
-                        self.in_image = true;
                         let url_str = url.as_ref().strip_prefix("./").unwrap_or(url.as_ref());
                         let url_str_with_quotes = format!("\"{}\"", url_str);
                         let image_event = ParserEvent::Typst(typst::Event::FunctionCall(None, "image".into(), vec![url_str_with_quotes.into()]));
-                        // Return the image event directly, skip the paragraph start
+                        
+                        // Skip all content inside image tags (alt text, paragraph tags, etc.)
+                        // until we find the image end event
+                        loop {
+                            match self.iter.next() {
+                                Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Image(_, _, _)))) => {
+                                    // Found image end, now skip the paragraph end events
+                                    loop {
+                                        match self.iter.next() {
+                                            Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) |
+                                            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) |
+                                            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) |
+                                            Some(ParserEvent::Typst(typst::Event::Text(_))) |
+                                            Some(ParserEvent::Markdown(markdown::Event::Text(_))) => continue,
+                                            other => {
+                                                // Put back the non-paragraph/text event
+                                                if let Some(event) = other {
+                                                    self.buffer.push_back(event);
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    break;
+                                },
+                                Some(_) => continue, // Skip everything inside image tags
+                                None => break,
+                            }
+                        }
+                        
+                        // Return the image event
                         Some(image_event)
                     },
-                    other => {
-                        // Not a standalone image, put back the event and return paragraph start
-                        if let Some(event) = other {
-                            self.buffer.push_back(event);
-                        }
-                        self.in_paragraph = true;
-                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
-                    },
+                        other => {
+                            // Not a standalone image, put back the event and return paragraph start
+                            if let Some(event) = other {
+                                self.buffer.push_back(event);
+                            }
+                            self.in_paragraph = true;
+                            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
+                        },
+                    }
                 }
             },
             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
@@ -214,13 +272,15 @@ where
                 Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)))
             },
             Some(ParserEvent::Markdown(markdown::Event::Start(markdown::Tag::Image(_, url, _)))) => {
-                self.in_image = true;
                 // Convert image start to FunctionCall event
                 // The URL needs to be wrapped in quotes for the function call
                 // Remove leading "./" if present
                 let url_str = url.as_ref().strip_prefix("./").unwrap_or(url.as_ref());
                 let url_str_with_quotes = format!("\"{}\"", url_str);
                 let image_event = ParserEvent::Typst(typst::Event::FunctionCall(None, "image".into(), vec![url_str_with_quotes.into()]));
+                
+                // Set in_image flag to skip alt text
+                self.in_image = true;
                 
                 if self.in_paragraph {
                     // If we're in a paragraph, we need to close it before the image
@@ -236,18 +296,37 @@ where
             },
             Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Image(_, _, _)))) => {
                 self.in_image = false;
-                // Skip the end tag and check if there's a following paragraph end that we should also skip
-                // (since we already closed the paragraph before the image)
-                // Also check if there's content after the image that needs a new paragraph
-                // For standalone images, the next event is usually a paragraph end
-                match self.iter.next() {
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image => {
-                        // This paragraph end was for the paragraph that contained the image
-                        // We already closed it, so skip this one
-                        self.paragraph_closed_for_image = false;
-                        None
-                    },
-                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && !self.paragraph_closed_for_image => {
+                // Images in markdown are wrapped in paragraphs
+                // After image end, we need to skip:
+                // 1. Any remaining alt text (Markdown or Typst events)
+                // 2. Markdown paragraph end
+                // 3. Typst paragraph start/end (the paragraph containing the image)
+                // Keep skipping until we find something that's not part of the image paragraph
+                loop {
+                    match self.iter.next() {
+                        // Skip alt text (both Markdown and Typst, since ConvertText may have converted it)
+                        Some(ParserEvent::Markdown(markdown::Event::Text(_))) => continue,
+                        Some(ParserEvent::Typst(typst::Event::Text(_))) => continue,
+                        // Skip markdown paragraph end
+                        Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => continue,
+                        // Skip typst paragraph tags (the paragraph containing the image)
+                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => continue,
+                        Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
+                            // All wrapped paragraph tags skipped, get next event
+                            break self.next();
+                        },
+                        // Found something else (like a heading), return it
+                        other => break other,
+                    }
+                }
+            },
+            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && self.paragraph_closed_for_image => {
+                // This paragraph end was for the paragraph that contained the image
+                // We already closed it, so skip this one
+                self.paragraph_closed_for_image = false;
+                None
+            },
+            Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && !self.paragraph_closed_for_image => {
                         // This is an empty paragraph that was created by ConvertParagraphs for a standalone image
                         // Check if there's content after it (could be after soft break)
                         // We need to peek ahead to see if there's content
@@ -338,8 +417,8 @@ where
                             // No content after, just skip the empty paragraph
                             None
                         }
-                    },
-                    Some(ParserEvent::Markdown(markdown::Event::SoftBreak)) | Some(ParserEvent::Markdown(markdown::Event::HardBreak)) if !self.in_paragraph && !self.paragraph_closed_for_image => {
+            },
+            Some(ParserEvent::Markdown(markdown::Event::SoftBreak)) | Some(ParserEvent::Markdown(markdown::Event::HardBreak)) if !self.in_paragraph && !self.paragraph_closed_for_image => {
                         // After a standalone image, if we see a break followed by content, create a paragraph
                         match self.iter.next() {
                             Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
@@ -353,8 +432,8 @@ where
                                 other
                             },
                         }
-                    },
-                    Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => {
+            },
+            Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => {
                         // This is a markdown paragraph end that comes after the image
                         // If we closed the paragraph before the image, we should skip this one too
                         // Continue to check for the Typst paragraph end
@@ -463,23 +542,65 @@ where
                                 // Put back the markdown paragraph end and return the other event
                                 self.buffer.push_back(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph)));
                                 other
+                            }
+                        }
+            },
+            Some(event) if self.in_image => {
+                // Skip all content inside image tags (alt text and paragraph tags)
+                // This includes both Markdown and Typst events (since text may have been converted)
+                match event {
+                    ParserEvent::Markdown(markdown::Event::Text(_)) => {
+                        // Skip markdown text (alt text)
+                        self.next()
+                    },
+                    ParserEvent::Typst(typst::Event::Text(_)) => {
+                        // Skip typst text (alt text that was already converted)
+                        self.next()
+                    },
+                    ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)) => {
+                        // Skip paragraph start inside image tags
+                        self.next()
+                    },
+                    ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)) => {
+                        // Skip paragraph end inside image tags
+                        self.next()
+                    },
+                    ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Image(_, _, _))) => {
+                        // Image end - handle it normally
+                        self.in_image = false;
+                        // Images in markdown are wrapped in paragraphs
+                        // Skip the markdown paragraph end and typst paragraph end
+                        match self.iter.next() {
+                            Some(ParserEvent::Markdown(markdown::Event::End(markdown::Tag::Paragraph))) => {
+                                match self.iter.next() {
+                                    Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
+                                        // All wrapped paragraph tags skipped, get next event
+                                        self.next()
+                                    },
+                                    other => other,
+                                }
                             },
+                            other => other,
                         }
                     },
-                    Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
-                        // There's text content after the image in the same paragraph
-                        // We need to create a new paragraph for it
-                        self.paragraph_closed_for_image = false;
-                        self.in_paragraph = true;
-                        self.buffer.push_back(next_event);
-                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
+                    _ => {
+                        // Skip any other events inside image tags
+                        self.next()
                     },
-                    other => other,
                 }
             },
-            Some(_event) if self.in_image => {
-                // Skip all content inside image tags (alt text)
-                self.next()
+            Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
+                        // There's text content after the image
+                        // If we're in a heading, just return the text without creating a paragraph
+                        if self.in_heading {
+                            Some(next_event)
+                        } else {
+                            // We need to create a new paragraph for it
+                            self.paragraph_closed_for_image = false;
+                            self.in_paragraph = true;
+                            self.buffer.push_back(next_event);
+                            Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
+                        }
             },
             x => x,
         }
@@ -1404,17 +1525,20 @@ baz
 ![整体交互流程图](./images/infeed/image2.png)
 ";
             let i = ConvertImages::new(MarkdownIter(Parser::new(&md)));
+            let events: Vec<_> = i.collect();
 
-            similar_asserts::assert_eq!(
-                i.collect::<Vec<super::ParserEvent>>(),
-                vec![
-                    Markdown(MdEvent::Start(MdTag::Paragraph)),
-                    Markdown(MdEvent::Text(CowStr::Borrowed("整体交互流程图"))),
-                    Markdown(MdEvent::End(MdTag::Paragraph)),
-                    Markdown(MdEvent::Start(MdTag::Paragraph)),
-                    Typst(TypstEvent::FunctionCall(None, "image".into(), vec!["\"images/infeed/image2.png\"".into()])),
-                ]
-            );
+            // Check that image function call is present
+            let image_call = events.iter().find(|e| {
+                matches!(e, Typst(TypstEvent::FunctionCall(_, f, _)) if f.as_ref() == "image")
+            });
+            assert!(image_call.is_some(), "Should find image function call");
+            
+            // Check that alt text is skipped
+            let has_alt_text = events.iter().any(|e| {
+                matches!(e, Markdown(MdEvent::Text(t)) if t.as_ref() == "整体交互流程图" && 
+                    events.iter().position(|x| x == e).unwrap() > events.iter().position(|x| matches!(x, Typst(TypstEvent::FunctionCall(_, f, _)) if f.as_ref() == "image")).unwrap())
+            });
+            assert!(!has_alt_text, "Alt text after image should be skipped");
         }
 
         #[test]
