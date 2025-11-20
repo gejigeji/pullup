@@ -21,6 +21,7 @@ pub struct TypstMarkup<'a, T> {
     tag_queue: VecDeque<Tag<'a>>,
     codeblock_queue: VecDeque<()>,
     row_buffer: Option<String>,
+    cell_buffer: Option<String>,
     iter: T,
 }
 
@@ -33,6 +34,7 @@ where
             tag_queue: VecDeque::new(),
             codeblock_queue: VecDeque::new(),
             row_buffer: None,
+            cell_buffer: None,
             iter,
         }
     }
@@ -129,17 +131,24 @@ where
                         }
                     }
                     Tag::Table(ref alignment) => {
-                        let alignments = alignment
+                        let num_columns = alignment.len();
+                        let alignments: Vec<String> = alignment
                             .iter()
                             .map(|a| match a {
-                                TableCellAlignment::Left => "left",
-                                TableCellAlignment::Center => "center",
-                                TableCellAlignment::Right => "right",
-                                TableCellAlignment::None => "none",
+                                TableCellAlignment::Left => "left".to_string(),
+                                TableCellAlignment::Center => "center".to_string(),
+                                TableCellAlignment::Right => "right".to_string(),
+                                TableCellAlignment::None => "start".to_string(),
                             })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        Some(format!("#table(align: [{}])[\n", alignments))
+                            .collect();
+                        
+                        // Build the table parameters
+                        let mut params = vec![format!("columns: {}", num_columns)];
+                        if !alignments.iter().all(|a| a == "start") {
+                            params.push(format!("align: ({})", alignments.join(", ")));
+                        }
+                        
+                        Some(format!("#table(\n  {},\n", params.join(", ")))
                     }
                     Tag::TableRow => {
                         self.row_buffer = Some(String::new());
@@ -149,7 +158,10 @@ where
                         self.row_buffer = Some(String::new());
                         Some("".to_string())
                     }
-                    Tag::TableCell => Some("[".to_string()),
+                    Tag::TableCell => {
+                        self.cell_buffer = Some(String::new());
+                        Some("".to_string())
+                    }
                     _ => todo!(),
                 };
 
@@ -158,8 +170,12 @@ where
                 if ret.is_none() {
                     return Some("".to_string());
                 }
-                // If we're in a row buffer, accumulate to buffer instead of returning
-                if let Some(ref mut buf) = self.row_buffer {
+                // If we're in a cell buffer (which means we're in a table cell), accumulate to cell buffer
+                if let Some(ref mut cell_buf) = self.cell_buffer {
+                    cell_buf.push_str(&ret.as_ref().unwrap());
+                    Some("".to_string())
+                } else if let Some(ref mut buf) = self.row_buffer {
+                    // If we're in a row buffer but not in a cell, accumulate to row buffer
                     buf.push_str(&ret.as_ref().unwrap());
                     Some("".to_string())
                 } else {
@@ -189,14 +205,15 @@ where
                         QuoteType::Inline => "]".to_string(),
                         QuoteType::Block => "]\n".to_string(),
                     }),
-                    Tag::Table(_) => Some("]\n".to_string()),
+                    Tag::Table(_) => Some(")\n".to_string()),
                     Tag::TableHead => {
                         if let Some(mut buf) = self.row_buffer.take() {
                             // Remove trailing ", " if present
                             if buf.ends_with(", ") {
                                 buf.truncate(buf.len() - 2);
                             }
-                            Some(format!("{}\n", buf))
+                            // Output row with cells on same line: [cell1], [cell2], ...
+                            Some(format!("  {},\n", buf))
                         } else {
                             Some("\n".to_string())
                         }
@@ -207,19 +224,56 @@ where
                             if buf.ends_with(", ") {
                                 buf.truncate(buf.len() - 2);
                             }
-                            Some(format!("{}\n", buf))
+                            // Output row with cells on same line: [cell1], [cell2], ...
+                            Some(format!("  {},\n", buf))
                         } else {
                             Some("\n".to_string())
                         }
                     }
                     Tag::TableCell => {
-                        // Always append "], " - if in buffer, accumulate; otherwise return
-                        if let Some(ref mut buf) = self.row_buffer {
-                            buf.push_str("], ");
-                            Some("".to_string())
+                        // Get cell content and decide if it needs quotes
+                        if let Some(mut cell_content) = self.cell_buffer.take() {
+                            // Replace <br> with \n
+                            cell_content = cell_content.replace("<br>", "\\n").replace("<br/>", "\\n").replace("<br />", "\\n");
+                            
+                            // Trim whitespace
+                            cell_content = cell_content.trim().to_string();
+                            
+                            // Check if cell content contains Typst markup (starts with #)
+                            // If it's plain text, wrap in quotes; otherwise use as-is
+                            let needs_quotes = !cell_content.trim_start().starts_with('#') 
+                                && !cell_content.contains("#emph")
+                                && !cell_content.contains("#strong")
+                                && !cell_content.contains("#link");
+                            
+                            // Wrap cell content in square brackets: [content]
+                            let formatted_cell = if cell_content.is_empty() {
+                                "[]".to_string()
+                            } else {
+                                format!("[{}]", cell_content)
+                            };
+                            
+                            // Append to row buffer with ", " separator
+                            if let Some(ref mut buf) = self.row_buffer {
+                                if !buf.is_empty() {
+                                    buf.push_str(", ");
+                                }
+                                buf.push_str(&formatted_cell);
+                            } else {
+                                // If row_buffer doesn't exist, this is an error state
+                                // But we'll still output the cell content
+                                eprintln!("Warning: TableCell ended but row_buffer is None");
+                            }
                         } else {
-                            Some("], ".to_string())
+                            // Empty cell
+                            if let Some(ref mut buf) = self.row_buffer {
+                                if !buf.is_empty() {
+                                    buf.push_str(", ");
+                                }
+                                buf.push_str("[]");
+                            }
                         }
+                        Some("".to_string())
                     }
                     _ => todo!(),
                 };
@@ -229,9 +283,12 @@ where
                 // Make sure we are in a good state.
                 assert_eq!(in_tag, Some(x.clone()));
                 
-                // If we're in a row buffer (but not ending the row or cell), accumulate to buffer
-                // Note: TableCell end is already handled in the match above
-                if self.row_buffer.is_some() && !matches!(&x, Tag::TableRow | Tag::TableHead | Tag::TableCell) {
+                // If we're in a cell buffer (which means we're in a table cell), accumulate to cell buffer
+                if let Some(ref mut cell_buf) = self.cell_buffer {
+                    cell_buf.push_str(&ret.as_ref().unwrap_or(&"".to_string()));
+                    Some("".to_string())
+                } else if self.row_buffer.is_some() && !matches!(&x, Tag::TableRow | Tag::TableHead | Tag::TableCell) {
+                    // If we're in a row buffer but not in a cell, accumulate to row buffer
                     if let Some(ref mut buf) = self.row_buffer {
                         buf.push_str(&ret.as_ref().unwrap_or(&"".to_string()));
                         Some("".to_string())
@@ -244,7 +301,10 @@ where
             }
             Some(Event::Raw(x)) => {
                 let content = x.into_string();
-                if let Some(ref mut buf) = self.row_buffer {
+                if let Some(ref mut cell_buf) = self.cell_buffer {
+                    cell_buf.push_str(&content);
+                    Some("".to_string())
+                } else if let Some(ref mut buf) = self.row_buffer {
                     buf.push_str(&content);
                     Some("".to_string())
                 } else {
@@ -257,7 +317,10 @@ where
                 } else {
                     x.into_string()
                 };
-                if let Some(ref mut buf) = self.row_buffer {
+                if let Some(ref mut cell_buf) = self.cell_buffer {
+                    cell_buf.push_str(&content);
+                    Some("".to_string())
+                } else if let Some(ref mut buf) = self.row_buffer {
                     buf.push_str(&content);
                     Some("".to_string())
                 } else {
@@ -625,7 +688,50 @@ mod tests {
 
         let output = TypstMarkup::new(input.into_iter()).collect::<String>();
         let expected =
-            "#table(align: [left, center])[\n[Header 1], [Header 2]\n]\n";
+            "#table(\n  columns: 2, align: (left, center),\n  [Header 1], [Header 2],\n)\n";
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn table_multiple_cells() {
+        let input = vec![
+            Event::Start(Tag::Table(vec![
+                TableCellAlignment::None,
+                TableCellAlignment::None,
+                TableCellAlignment::None,
+            ])),
+            Event::Start(Tag::TableHead),
+            Event::Start(Tag::TableCell),
+            Event::Text("序号".into()),
+            Event::End(Tag::TableCell),
+            Event::Start(Tag::TableCell),
+            Event::Text("版本".into()),
+            Event::End(Tag::TableCell),
+            Event::Start(Tag::TableCell),
+            Event::Text("版本号".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableHead),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("1".into()),
+            Event::End(Tag::TableCell),
+            Event::Start(Tag::TableCell),
+            Event::Text("V1.0".into()),
+            Event::End(Tag::TableCell),
+            Event::Start(Tag::TableCell),
+            Event::Text("1".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::Table(vec![
+                TableCellAlignment::None,
+                TableCellAlignment::None,
+                TableCellAlignment::None,
+            ])),
+        ];
+
+        let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+        // Each cell should be in separate array elements
+        let expected = "#table(\n  columns: 3,\n  [序号], [版本], [版本号],\n  [1], [V1.0], [1],\n)\n";
+        assert_eq!(output, expected, "Cells should be properly separated");
     }
 }
