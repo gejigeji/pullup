@@ -284,27 +284,7 @@ where
                                     }
                                     break;
                                 },
-                                Some(event @ ParserEvent::Typst(typst::Event::Start(typst::Tag::Heading(_, _, _)))) => {
-                                    // Found a heading start, collect the entire heading
-                                    peek_events.push(event);
-                                    // Continue to collect heading content and end
-                                    loop {
-                                        match self.iter.next() {
-                                            Some(e @ ParserEvent::Typst(typst::Event::End(typst::Tag::Heading(_, _, _)))) => {
-                                                peek_events.push(e);
-                                                break;
-                                            },
-                                            Some(e) => {
-                                                peek_events.push(e);
-                                                continue;
-                                            },
-                                            None => break,
-                                        }
-                                    }
-                                    break;
-                                },
                                 other => {
-                                    // Any other event should be preserved
                                     if let Some(event) = other {
                                         peek_events.push(event);
                                     }
@@ -312,9 +292,6 @@ where
                                 },
                             }
                         }
-                        
-                        // Check if there are other events (like headings) before putting them back
-                        let has_other_events = !peek_events.is_empty() && !next_paragraph_start && !found_content;
                         
                         // Put back all peeked events in reverse order
                         for event in peek_events.into_iter().rev() {
@@ -330,10 +307,6 @@ where
                             self.in_paragraph = true;
                             // Return paragraph start immediately, content is already in buffer
                             Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)))
-                        } else if has_other_events {
-                            // There are other events (like headings) after the image
-                            // Just skip the empty paragraph end, events are already in buffer
-                            None
                         } else {
                             // No content after, just skip the empty paragraph
                             None
@@ -366,83 +339,8 @@ where
                             },
                             Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) if !self.in_paragraph && !self.paragraph_closed_for_image => {
                                 // This is an empty paragraph that was created by ConvertParagraphs for a standalone image
-                                // Check if there's content after it (like headings)
-                                // Use the same peek logic as the main branch
-                                let mut peek_events = Vec::new();
-                                let mut found_content = false;
-                                let mut next_paragraph_start = false;
-                                
-                                // Peek at next events to see if there's content
-                                loop {
-                                    match self.iter.next() {
-                                        Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => {
-                                            next_paragraph_start = true;
-                                            peek_events.push(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph)));
-                                            break;
-                                        },
-                                        Some(break_event @ ParserEvent::Markdown(markdown::Event::SoftBreak)) | Some(break_event @ ParserEvent::Markdown(markdown::Event::HardBreak)) => {
-                                            peek_events.push(break_event);
-                                            continue;
-                                        },
-                                        Some(next_event @ (ParserEvent::Typst(typst::Event::Text(_)) | ParserEvent::Markdown(markdown::Event::Text(_)))) => {
-                                            found_content = true;
-                                            peek_events.push(next_event);
-                                            match self.iter.next() {
-                                                Some(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph))) => {
-                                                    peek_events.push(ParserEvent::Typst(typst::Event::End(typst::Tag::Paragraph)));
-                                                },
-                                                other => {
-                                                    if let Some(event) = other {
-                                                        peek_events.push(event);
-                                                    }
-                                                },
-                                            }
-                                            break;
-                                        },
-                                        Some(event @ ParserEvent::Typst(typst::Event::Start(typst::Tag::Heading(_, _, _)))) => {
-                                            peek_events.push(event);
-                                            loop {
-                                                match self.iter.next() {
-                                                    Some(e @ ParserEvent::Typst(typst::Event::End(typst::Tag::Heading(_, _, _)))) => {
-                                                        peek_events.push(e);
-                                                        break;
-                                                    },
-                                                    Some(e) => {
-                                                        peek_events.push(e);
-                                                        continue;
-                                                    },
-                                                    None => break,
-                                                }
-                                            }
-                                            break;
-                                        },
-                                        other => {
-                                            if let Some(event) = other {
-                                                peek_events.push(event);
-                                            }
-                                            break;
-                                        },
-                                    }
-                                }
-                                
-                                let has_other_events = !peek_events.is_empty() && !next_paragraph_start && !found_content;
-                                
-                                // Put back all peeked events in reverse order
-                                for event in peek_events.into_iter().rev() {
-                                    self.buffer.push_front(event);
-                                }
-                                
-                                if next_paragraph_start {
-                                    self.in_paragraph = true;
-                                    None
-                                } else if found_content {
-                                    self.in_paragraph = true;
-                                    None
-                                } else if has_other_events {
-                                    None
-                                } else {
-                                    None
-                                }
+                                // Skip it to avoid generating #par()[]
+                                None
                             },
                             Some(ParserEvent::Typst(typst::Event::Start(typst::Tag::Paragraph))) => {
                                 // There's a new paragraph after the image, which is correct
