@@ -12,6 +12,41 @@ fn typst_escape(s: &str) -> String {
         .replace('@', "\\@")
 }
 
+/// Process link URL to better handle markdown file links with anchors.
+/// 
+/// For links like `./file.md#anchor`, this function:
+/// - Removes leading `./` if present
+/// - Converts `.md` extension to `.typ` for Typst compatibility
+/// - Preserves anchor fragments (#anchor)
+fn process_link_url(url: &str) -> String {
+    let mut processed = url.to_string();
+    
+    // Remove leading "./" if present
+    if processed.starts_with("./") {
+        processed = processed[2..].to_string();
+    }
+    
+    // Handle markdown file links with anchors
+    if let Some(anchor_pos) = processed.find('#') {
+        let (file_part, anchor_part) = processed.split_at(anchor_pos);
+        
+        // Convert .md to .typ if it's a markdown file link
+        let file_part = if file_part.ends_with(".md") {
+            file_part.strip_suffix(".md").unwrap_or(file_part).to_string() + ".typ"
+        } else {
+            file_part.to_string()
+        };
+        
+        // Reconstruct URL with processed file part and anchor
+        processed = format!("{}{}", file_part, anchor_part);
+    } else if processed.ends_with(".md") {
+        // Convert .md to .typ if no anchor
+        processed = processed.strip_suffix(".md").unwrap_or(&processed).to_string() + ".typ";
+    }
+    
+    processed
+}
+
 /// Convert Typst events to Typst markup.
 ///
 /// Note: while each item returned by the iterator is a `String`, items may contain
@@ -110,9 +145,12 @@ where
                     }
                     Tag::Emphasis => Some("#emph[".to_string()),
                     Tag::Strong => Some("#strong[".to_string()),
-                    Tag::Link(ref ty, ref url) => match ty {
-                        LinkType::Content => Some(format!("#link(\"{url}\")[")),
-                        LinkType::Url | LinkType::Autolink => Some(format!("#link(\"{url}\")[")),
+                    Tag::Link(ref ty, ref url) => {
+                        let processed_url = process_link_url(url);
+                        match ty {
+                            LinkType::Content => Some(format!("#link(\"{processed_url}\")[")),
+                            LinkType::Url | LinkType::Autolink => Some(format!("#link(\"{processed_url}\")[")),
+                        }
                     },
                     Tag::Quote(ref ty, ref quotes, ref attribution) => {
                         let block = match ty {
@@ -555,6 +593,54 @@ mod tests {
             ];
             let output = TypstMarkup::new(input.into_iter()).collect::<String>();
             let expected = "#link(\"http://example.com\")[\\*blah\\*]";
+            assert_eq!(&output, &expected);
+        }
+
+        #[test]
+        fn processes_markdown_file_link_with_anchor() {
+            let input = vec![
+                Event::Start(Tag::Link(LinkType::Content, "./tcp附录.md#附录五-分拣机机器类型表".into())),
+                Event::Text("附录五-分拣机机器类型表".into()),
+                Event::End(Tag::Link(LinkType::Content, "./tcp附录.md#附录五-分拣机机器类型表".into())),
+            ];
+            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+            let expected = "#link(\"tcp附录.typ#附录五-分拣机机器类型表\")[附录五-分拣机机器类型表]";
+            assert_eq!(&output, &expected);
+        }
+
+        #[test]
+        fn processes_markdown_file_link_without_anchor() {
+            let input = vec![
+                Event::Start(Tag::Link(LinkType::Content, "./file.md".into())),
+                Event::Text("link text".into()),
+                Event::End(Tag::Link(LinkType::Content, "./file.md".into())),
+            ];
+            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+            let expected = "#link(\"file.typ\")[link text]";
+            assert_eq!(&output, &expected);
+        }
+
+        #[test]
+        fn processes_markdown_file_link_with_anchor_no_leading_dot() {
+            let input = vec![
+                Event::Start(Tag::Link(LinkType::Content, "tcp附录.md#附录五-分拣机机器类型表".into())),
+                Event::Text("附录五-分拣机机器类型表".into()),
+                Event::End(Tag::Link(LinkType::Content, "tcp附录.md#附录五-分拣机机器类型表".into())),
+            ];
+            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+            let expected = "#link(\"tcp附录.typ#附录五-分拣机机器类型表\")[附录五-分拣机机器类型表]";
+            assert_eq!(&output, &expected);
+        }
+
+        #[test]
+        fn processes_regular_http_link() {
+            let input = vec![
+                Event::Start(Tag::Link(LinkType::Content, "https://example.com/page".into())),
+                Event::Text("Example".into()),
+                Event::End(Tag::Link(LinkType::Content, "https://example.com/page".into())),
+            ];
+            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
+            let expected = "#link(\"https://example.com/page\")[Example]";
             assert_eq!(&output, &expected);
         }
     }
