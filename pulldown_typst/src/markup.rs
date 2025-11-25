@@ -18,7 +18,17 @@ fn typst_escape(s: &str) -> String {
 /// - Removes leading `./` if present
 /// - Converts `.md` extension to `.typ` for Typst compatibility
 /// - Preserves anchor fragments (#anchor)
+#[cfg(test)]
+pub(crate) fn process_link_url(url: &str) -> String {
+    process_link_url_impl(url)
+}
+
+#[cfg(not(test))]
 fn process_link_url(url: &str) -> String {
+    process_link_url_impl(url)
+}
+
+fn process_link_url_impl(url: &str) -> String {
     let mut processed = url.to_string();
     
     // Remove leading "./" if present
@@ -642,6 +652,16 @@ mod tests {
             let output = TypstMarkup::new(input.into_iter()).collect::<String>();
             let expected = "#link(\"https://example.com/page\")[Example]";
             assert_eq!(&output, &expected);
+        }
+
+        #[test]
+        fn test_process_link_url_function() {
+            // Test the process_link_url function directly
+            assert_eq!(process_link_url("./tcp附录.md#附录五-分拣机机器类型表"), "tcp附录.typ#附录五-分拣机机器类型表");
+            assert_eq!(process_link_url("./file.md"), "file.typ");
+            assert_eq!(process_link_url("file.md#anchor"), "file.typ#anchor");
+            assert_eq!(process_link_url("https://example.com/page"), "https://example.com/page");
+            assert_eq!(process_link_url("./path/to/file.md#section"), "path/to/file.typ#section");
         }
     }
 
