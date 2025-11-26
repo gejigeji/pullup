@@ -30,7 +30,6 @@ pub struct Conversion<'a, T> {
     paragraphs: bool,
     soft_breaks: bool,
     hard_breaks: bool,
-    br_tags: bool,
     text: bool,
     strong: bool,
     emphasis: bool,
@@ -57,7 +56,6 @@ impl<
         __paragraphs: ::typed_builder::Optional<bool>,
         __soft_breaks: ::typed_builder::Optional<bool>,
         __hard_breaks: ::typed_builder::Optional<bool>,
-        __br_tags: ::typed_builder::Optional<bool>,
         __text: ::typed_builder::Optional<bool>,
         __strong: ::typed_builder::Optional<bool>,
         __emphasis: ::typed_builder::Optional<bool>,
@@ -80,10 +78,9 @@ impl<
             __content,
             __headings,
             __paragraphs,
-        __soft_breaks,
-        __hard_breaks,
-        __br_tags,
-        __text,
+            __soft_breaks,
+            __hard_breaks,
+            __text,
             __strong,
             __emphasis,
             __blockquotes,
@@ -129,9 +126,6 @@ where
             }
             if this.hard_breaks {
                 events = Box::new(ConvertHardBreaks::new(events));
-            }
-            if this.br_tags {
-                events = Box::new(ConvertBrTags::new(events));
             }
             if this.text {
                 events = Box::new(ConvertText::new(events));
