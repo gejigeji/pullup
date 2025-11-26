@@ -1,5 +1,5 @@
 use crate::{Event, LinkType, QuoteQuotes, QuoteType, ShowType, TableCellAlignment, Tag};
-use std::{collections::{HashMap, VecDeque}, fmt::Write, io::ErrorKind};
+use std::{collections::VecDeque, fmt::Write, io::ErrorKind};
 
 fn typst_escape(s: &str) -> String {
     s.replace('$', "\\$")
@@ -12,79 +12,24 @@ fn typst_escape(s: &str) -> String {
         .replace('@', "\\@")
 }
 
-/// Generate a label ID from heading text.
-/// This converts text to a slug-like identifier suitable for Typst labels.
-fn generate_label_id(text: &str) -> String {
-    // Convert to lowercase and replace spaces/special chars with hyphens
-    text.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c.to_lowercase().to_string()
-            } else if c.is_whitespace() {
-                "-".to_string()
-            } else {
-                // For Chinese and other Unicode characters, keep them as-is
-                // Typst supports Unicode in labels
-                c.to_string()
-            }
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-        .trim_matches('-')
-        .to_string()
-}
-
 /// Process link URL to better handle markdown file links with anchors.
 /// 
 /// For links like `./file.md#anchor`, this function:
 /// - Removes leading `./` if present
 /// - Converts `.md` extension to `.typ` for Typst compatibility
 /// - Preserves anchor fragments (#anchor)
-/// 
-/// For internal links (only anchor, no file), returns the anchor as-is for label reference.
 #[cfg(test)]
 pub(crate) fn process_link_url(url: &str) -> String {
-    process_link_url_impl(url, None)
+    process_link_url_impl(url)
 }
 
-/// Process link URL with optional label mapping for internal links.
-fn process_link_url_impl(url: &str, label_map: Option<&HashMap<String, String>>) -> String {
+#[cfg(not(test))]
+fn process_link_url(url: &str) -> String {
+    process_link_url_impl(url)
+}
+
+fn process_link_url_impl(url: &str) -> String {
     let mut processed = url.to_string();
-    
-    // Check if this is an internal link (starts with # or only contains anchor)
-    if processed.starts_with('#') {
-        // Internal link - extract anchor
-        let anchor = &processed[1..];
-        // If we have a label map, try to find the label
-        if let Some(map) = label_map {
-            // Try to find exact match or generate label from anchor
-            if let Some(label) = map.get(anchor) {
-                return format!("<{}>", label);
-            }
-            // Generate label from anchor text
-            let label = generate_label_id(anchor);
-            if let Some(existing_label) = map.get(&label) {
-                return format!("<{}>", existing_label);
-            }
-            // Use the generated label
-            return format!("<{}>", label);
-        }
-        // No label map, use anchor as label
-        let label = generate_label_id(anchor);
-        return format!("<{}>", label);
-    }
-    
-    // Check if this is a relative link with only anchor (e.g., "./#anchor" or "#anchor")
-    if processed == "#" || (processed.starts_with("./#") || processed.starts_with("/#")) {
-        let anchor = processed.trim_start_matches("./").trim_start_matches("/").trim_start_matches('#');
-        if !anchor.is_empty() {
-            let label = generate_label_id(anchor);
-            return format!("<{}>", label);
-        }
-    }
     
     // Remove leading "./" if present
     if processed.starts_with("./") {
@@ -94,15 +39,6 @@ fn process_link_url_impl(url: &str, label_map: Option<&HashMap<String, String>>)
     // Handle markdown file links with anchors
     if let Some(anchor_pos) = processed.find('#') {
         let (file_part, anchor_part) = processed.split_at(anchor_pos);
-        
-        // If file_part is empty or just ".", this is an internal link
-        let file_part_trimmed = file_part.trim_end_matches('.');
-        if file_part_trimmed.is_empty() {
-            // Internal link - use anchor as label
-            let anchor = anchor_part.trim_start_matches('#');
-            let label = generate_label_id(anchor);
-            return format!("<{}>", label);
-        }
         
         // Convert .md to .typ if it's a markdown file link
         let file_part = if file_part.ends_with(".md") {
@@ -132,8 +68,6 @@ pub struct TypstMarkup<'a, T> {
     row_buffer: Option<String>,
     cell_buffer: Option<String>,
     paragraph_closed_for_image: bool, // Track if we closed paragraph for an image
-    heading_text_buffer: Option<String>, // Buffer for collecting heading text to generate labels
-    label_map: HashMap<String, String>, // Map from anchor text to label IDs
     iter: T,
 }
 
@@ -148,8 +82,6 @@ where
             row_buffer: None,
             cell_buffer: None,
             paragraph_closed_for_image: false,
-            heading_text_buffer: None,
-            label_map: HashMap::new(),
             iter,
         }
     }
@@ -196,11 +128,7 @@ where
                             .to_string(),
                         ),
                     },
-                    Tag::Heading(n, _, _) => {
-                        // Start collecting heading text for label generation
-                        self.heading_text_buffer = Some(String::new());
-                        Some(format!("{} ", "=".repeat(n.get().into())))
-                    },
+                    Tag::Heading(n, _, _) => Some(format!("{} ", "=".repeat(n.get().into()))),
                     // TODO: get the number of backticks / tildes somehow.
                     Tag::CodeBlock(ref fence, ref _display) => {
                         let depth = self.codeblock_queue.len();
@@ -228,24 +156,10 @@ where
                     Tag::Emphasis => Some("#emph[".to_string()),
                     Tag::Strong => Some("#strong[".to_string()),
                     Tag::Link(ref ty, ref url) => {
-                        // Check if this is an internal link (starts with <) or needs label resolution
-                        let processed_url = if url.starts_with('<') {
-                            // Already a label reference
-                            url.to_string()
-                        } else {
-                            process_link_url_impl(url, Some(&self.label_map))
-                        };
-                        
-                        // If processed URL is a label reference (starts with <), use label syntax
-                        let link_markup = if processed_url.starts_with('<') {
-                            format!("#link({processed_url})[")
-                        } else {
-                            format!("#link(\"{processed_url}\")[")
-                        };
-                        
+                        let processed_url = process_link_url(url);
                         match ty {
-                            LinkType::Content => Some(link_markup),
-                            LinkType::Url | LinkType::Autolink => Some(link_markup),
+                            LinkType::Content => Some(format!("#link(\"{processed_url}\")[")),
+                            LinkType::Url | LinkType::Autolink => Some(format!("#link(\"{processed_url}\")[")),
                         }
                     },
                     Tag::Quote(ref ty, ref quotes, ref attribution) => {
@@ -329,18 +243,7 @@ where
                 }
                 let ret = match x {
                     Tag::Paragraph => Some("]\n".to_string()),
-                    Tag::Heading(_, _, _) => {
-                        // Generate label from heading text and add it to the heading
-                        if let Some(heading_text) = self.heading_text_buffer.take() {
-                            let label = generate_label_id(&heading_text);
-                            // Store in label map for link resolution
-                            self.label_map.insert(heading_text.clone(), label.clone());
-                            // Return heading end with label: " <label>\n"
-                            Some(format!(" <{}>\n", label))
-                        } else {
-                            Some("\n".to_string())
-                        }
-                    },
+                    Tag::Heading(_, _, _) => Some("\n".to_string()),
                     Tag::Item => Some("\n".to_string()),
                     Tag::Emphasis => Some("]".to_string()),
                     Tag::Strong => Some("]".to_string()),
@@ -492,18 +395,11 @@ where
                 }
             }
             Some(Event::Text(x)) => {
-                // If we're collecting heading text, add to buffer before processing
-                if let Some(ref mut heading_buf) = self.heading_text_buffer {
-                    // Add raw text (before escaping) to heading buffer for label generation
-                    heading_buf.push_str(&x);
-                }
-                
                 let content = if self.codeblock_queue.is_empty() {
                     typst_escape(&x)
                 } else {
                     x.into_string()
                 };
-                
                 if let Some(ref mut cell_buf) = self.cell_buffer {
                     cell_buf.push_str(&content);
                     Some("".to_string())
@@ -718,7 +614,6 @@ mod tests {
                 Event::End(Tag::Link(LinkType::Content, "./tcp附录.md#附录五-分拣机机器类型表".into())),
             ];
             let output = TypstMarkup::new(input.into_iter()).collect::<String>();
-            // Note: This is an external file link, so it should still use URL format
             let expected = "#link(\"tcp附录.typ#附录五-分拣机机器类型表\")[附录五-分拣机机器类型表]";
             assert_eq!(&output, &expected);
         }
@@ -767,64 +662,6 @@ mod tests {
             assert_eq!(process_link_url("file.md#anchor"), "file.typ#anchor");
             assert_eq!(process_link_url("https://example.com/page"), "https://example.com/page");
             assert_eq!(process_link_url("./path/to/file.md#section"), "path/to/file.typ#section");
-            // Test internal links
-            assert_eq!(process_link_url("#anchor"), "<anchor>");
-            assert_eq!(process_link_url("#附录五-分拣机机器类型表"), "<附录五-分拣机机器类型表>");
-            assert_eq!(process_link_url("./#anchor"), "<anchor>");
-        }
-        
-        #[test]
-        fn test_internal_link_with_heading_label() {
-            // Test that internal links use label references when heading exists
-            let input = vec![
-                Event::Start(Tag::Heading(core::num::NonZeroU8::new(1).unwrap(), crate::TableOfContents::Include, crate::Bookmarks::Include)),
-                Event::Text("My Heading".into()),
-                Event::End(Tag::Heading(core::num::NonZeroU8::new(1).unwrap(), crate::TableOfContents::Include, crate::Bookmarks::Include)),
-                Event::Start(Tag::Paragraph),
-                Event::Start(Tag::Link(LinkType::Content, "#My Heading".into())),
-                Event::Text("link to heading".into()),
-                Event::End(Tag::Link(LinkType::Content, "#My Heading".into())),
-                Event::End(Tag::Paragraph),
-            ];
-            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
-            // Heading should have label, link should use label reference
-            assert!(output.contains("= My Heading <my-heading>"));
-            assert!(output.contains("#link(<my-heading>)[link to heading]"));
-        }
-        
-        #[test]
-        fn test_heading_with_nested_formatting() {
-            // Test that headings with nested formatting (emphasis, strong) still generate correct labels
-            let input = vec![
-                Event::Start(Tag::Heading(core::num::NonZeroU8::new(2).unwrap(), crate::TableOfContents::Include, crate::Bookmarks::Include)),
-                Event::Text("Important ".into()),
-                Event::Start(Tag::Strong),
-                Event::Text("Section".into()),
-                Event::End(Tag::Strong),
-                Event::End(Tag::Heading(core::num::NonZeroU8::new(2).unwrap(), crate::TableOfContents::Include, crate::Bookmarks::Include)),
-            ];
-            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
-            // Heading should have label based on full text content
-            assert!(output.contains("== Important #strong[Section] <important-section>"));
-        }
-        
-        #[test]
-        fn test_internal_link_with_chinese_heading() {
-            // Test internal links with Chinese headings
-            let input = vec![
-                Event::Start(Tag::Heading(core::num::NonZeroU8::new(1).unwrap(), crate::TableOfContents::Include, crate::Bookmarks::Include)),
-                Event::Text("附录五-分拣机机器类型表".into()),
-                Event::End(Tag::Heading(core::num::NonZeroU8::new(1).unwrap(), crate::TableOfContents::Include, crate::Bookmarks::Include)),
-                Event::Start(Tag::Paragraph),
-                Event::Start(Tag::Link(LinkType::Content, "#附录五-分拣机机器类型表".into())),
-                Event::Text("查看附录".into()),
-                Event::End(Tag::Link(LinkType::Content, "#附录五-分拣机机器类型表".into())),
-                Event::End(Tag::Paragraph),
-            ];
-            let output = TypstMarkup::new(input.into_iter()).collect::<String>();
-            // Heading should have label, link should use label reference
-            assert!(output.contains("附录五-分拣机机器类型表 <"));
-            assert!(output.contains("#link(<"));
         }
     }
 
