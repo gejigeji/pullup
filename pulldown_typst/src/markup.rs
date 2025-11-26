@@ -388,8 +388,8 @@ where
                     Tag::TableCell => {
                         // Get cell content and decide if it needs quotes
                         if let Some(mut cell_content) = self.cell_buffer.take() {
-                            // Replace <br> with \n
-                            cell_content = cell_content.replace("<br>", "\\n").replace("<br/>", "\\n").replace("<br />", "\\n");
+                            // Replace <br> with \ + newline (Typst line break)
+                            cell_content = cell_content.replace("<br>", "\\\n").replace("<br/>", "\\\n").replace("<br />", "\\\n");
                             
                             // Escape // to \/\/ for table cells
                             cell_content = cell_content.replace("//", "\\/\\/");
