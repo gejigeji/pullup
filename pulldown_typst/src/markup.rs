@@ -294,6 +294,9 @@ where
                             // Replace <br> with \ + newline (Typst line break)
                             cell_content = cell_content.replace("<br>", "\\\n").replace("<br/>", "\\\n").replace("<br />", "\\\n");
                             
+                            // Restore underscores that were escaped by typst_escape ( \\_ -> _)
+                            cell_content = cell_content.replace(" \\_", "_");
+                            
                             // Escape // to \/\/ for table cells
                             cell_content = cell_content.replace("//", "\\/\\/");
                             
