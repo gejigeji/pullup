@@ -281,6 +281,31 @@ converter!(
 });
 
 converter!(
+    /// Convert Markdown HTML br tags to Typst line breaks.
+    ConvertBrTags,
+    ParserEvent<'a> => ParserEvent<'a>,
+    |this: &mut Self| {
+        match this.iter.next() {
+            Some(ParserEvent::Markdown(markdown::Event::Html(html))) => {
+                // Check if this is a <br> tag (case-insensitive)
+                let html_str = html.as_ref().trim();
+                if html_str.eq_ignore_ascii_case("<br>") 
+                    || html_str.eq_ignore_ascii_case("<br/>") 
+                    || html_str.eq_ignore_ascii_case("<br />")
+                    || html_str.eq_ignore_ascii_case("<br></br>") {
+                    // Convert to Typst linebreak
+                    Some(ParserEvent::Typst(typst::Event::Linebreak))
+                } else {
+                    // For other HTML tags, pass through as-is (or filter out)
+                    // You might want to handle other HTML tags differently
+                    this.next()
+                }
+            },
+            x => x,
+    }
+});
+
+converter!(
     /// Convert Markdown blockquotes to Typst quotes.
     ConvertBlockQuotes,
     ParserEvent<'a> => ParserEvent<'a>,
@@ -1164,7 +1189,7 @@ baz
             });
             assert!(image_call.is_some(), "Should find image function call");
             if let Some(Typst(TypstEvent::FunctionCall(_, _, args))) = image_call {
-                assert_eq!(args[0].as_ref(), "\"images/test.png\"");
+                similar_asserts::assert_eq!(args[0].as_ref(), "\"images/test.png\"");
             }
         }
 
@@ -1209,6 +1234,57 @@ baz
             assert!(found_image, "Should find image function call");
             // When image is in paragraph, paragraph should be closed before image
             // Note: This test may need adjustment based on actual markdown parsing behavior
+        }
+    }
+
+    mod br_tags {
+        use super::*;
+
+        #[test]
+        fn convert_br_tag() {
+            let md = "Line 1<br>Line 2";
+            let i = ConvertBrTags::new(MarkdownIter(Parser::new(&md)));
+
+            let events: Vec<_> = i.collect();
+            // Find the linebreak event
+            let has_linebreak = events.iter().any(|e| {
+                matches!(e, Typst(TypstEvent::Linebreak))
+            });
+            assert!(has_linebreak, "Should convert <br> to linebreak");
+        }
+
+        #[test]
+        fn convert_br_tag_variants() {
+            // Test <br/>
+            let md = "Line 1<br/>Line 2";
+            let i = ConvertBrTags::new(MarkdownIter(Parser::new(&md)));
+            let events: Vec<_> = i.collect();
+            assert!(events.iter().any(|e| matches!(e, Typst(TypstEvent::Linebreak))), 
+                "Should convert <br/> to linebreak");
+
+            // Test <br />
+            let md = "Line 1<br />Line 2";
+            let i = ConvertBrTags::new(MarkdownIter(Parser::new(&md)));
+            let events: Vec<_> = i.collect();
+            assert!(events.iter().any(|e| matches!(e, Typst(TypstEvent::Linebreak))), 
+                "Should convert <br /> to linebreak");
+        }
+
+        #[test]
+        fn convert_br_tag_in_paragraph() {
+            let md = "First line<br>Second line";
+            let i = ConvertBrTags::new(ConvertParagraphs::new(MarkdownIter(Parser::new(&md))));
+
+            let events: Vec<_> = i.collect();
+            // Should have paragraph start, text, linebreak, text, paragraph end
+            let mut found_linebreak = false;
+            for event in &events {
+                if matches!(event, Typst(TypstEvent::Linebreak)) {
+                    found_linebreak = true;
+                    break;
+                }
+            }
+            assert!(found_linebreak, "Should have linebreak in paragraph");
         }
     }
 
